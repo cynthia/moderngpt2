@@ -1,0 +1,18 @@
+# Basic Accelerate config file for multi-GPU training.
+# Generate a more specific one using `accelerate config` on your system.
+# This example is for a single node. For multi-node, refer to Accelerate docs.
+
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED # Using DeepSpeed for distributed training
+num_processes: 4 # Default to 4, change as per your number of GPUs for multi-GPU commands
+machine_rank: 0
+num_machines: 1
+gpu_ids: null # 'all' or specific IDs like '0,1,2,3'. null usually means all visible.
+# deepspeed_config: {} # This will be overridden by --deepspeed_config in train.py if provided
+# use_cpu: false # Set to true if you want to force CPU, generally false for GPU training
+
+# For mixed precision, you can set it here or it might be handled by DeepSpeed fp16 config
+# mixed_precision: "fp16" # "no", "fp16", "bf16"
+
+# Further options can be added based on `accelerate config` prompts
+# e.g. tpu_use_cluster, tpu_vm, etc.

@@ -1,0 +1,14 @@
+{
+  "zero_optimization": {
+    "stage": 1
+  },
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": "auto"
+    }
+  },
+  "fp16": {
+    "enabled": true
+  }
+}
