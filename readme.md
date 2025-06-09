@@ -77,9 +77,24 @@ python pretokenize_dataset.py \
 
 Processes 5M lines from English and Japanese C4, creating sharded Parquet files with 1024-token blocks.
 
+**Note on Parallelism in Pre-tokenization:**
+- The `pretokenize_dataset.py` script can utilize multiple CPU cores for faster processing using the `--num_proc <number>` argument. By default, it uses (CPU count - 2) processes.
+- However, **parallel processing via `--num_proc` is only effective if you run the script with the `--no_dataset_streaming` flag.** This is because the `datasets.map()` function cannot use multiprocessing with streaming datasets.
+- **Warning:** Using `--no_dataset_streaming` will cause the script to download and load the *entirety* of the specified C4 language splits into your Hugging Face cache directory (or memory if cache is disabled) before processing begins. This can require a very large amount of disk space and memory, especially for multiple languages from C4.
+- If you use the default `--dataset_streaming` (or explicitly specify it), pre-tokenization will run on a single core but will be more memory-efficient for very large datasets.
+
 ### Step 3: Train Your Model
 
 We support various model sizes (small, medium, large, xl) and hardware configurations:
+
+The training script offers two main ways to handle your dataset:
+*   **Using pre-tokenized data (recommended):** Provide the path to your pre-processed Parquet files using the `--pre_tokenized_dataset_path /path/to/your/pretokenized_data` argument. This is generally faster as tokenization is done only once. You can generate this data using the `pretokenize_dataset.py` script.
+*   **On-the-fly C4 streaming:** If `--pre_tokenized_dataset_path` is omitted, the script defaults to streaming the C4 dataset and tokenizing it during training. In this mode, ensure you set `--block_size` (e.g., `--block_size 1024`) to define the sequence length for the model.
+
+**Mixed Precision Training:**
+- Use `--fp16` to enable FP16 mixed precision training.
+- Use `--bf16` to enable BF16 mixed precision training (requires Ampere or newer NVIDIA GPUs, or compatible hardware).
+- Note: `--fp16` and `--bf16` are mutually exclusive.
 
 #### Single GPU Training
 
@@ -89,10 +104,14 @@ deepspeed train.py \
     --deepspeed_config "ds_config_zero1.json" \
     --model_size_name "medium" \
     --tokenizer_path "./my_tokenizer" \
+    --pre_tokenized_dataset_path "./my_pretokenized_data" \
     --output_dir "output/model" \
     --num_train_epochs 3 \
-    --per_device_train_batch_size 32 \
-    --learning_rate 2.5e-4
+    --per_device_train_batch_size 16 \
+    --learning_rate 2.5e-4 \
+    --ds_config "ds_config_zero1.json" \
+    --fp16 \
+    --gradient_accumulation_steps 1
 ```
 
 #### Multi-GPU Training
@@ -103,7 +122,12 @@ accelerate launch --config_file accelerate_config.yaml --num_processes 4 train.p
     --tokenizer_path "./my_tokenizer" \
     --pre_tokenized_dataset_path "./my_pretokenized_data" \
     --output_dir "output/multi_gpu_model" \
-    --deepspeed_config "ds_config_zero1.json"
+    --ds_config "ds_config_zero1.json" \
+    --num_train_epochs 3 \
+    --per_device_train_batch_size 16 \
+    --learning_rate 2.5e-4 \
+    --fp16 \
+    --gradient_accumulation_steps 1
 ```
 
 > **Note**: First run `accelerate config` to create your configuration file. The provided `accelerate_config.yaml` assumes 4 GPUs with DeepSpeed.

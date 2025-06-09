@@ -78,14 +78,14 @@ class ModernGPT2RotaryEmbedding(nn.Module):
         self.cache_dtype = cache_dtype
         self.scaling_factor = getattr(config, "rope_scaling_factor", None)
 
-        self._set_cos_sin_cache(seq_len=self.max_position_embeddings, device="meta", dtype=self.cache_dtype)
+        self._set_cos_sin_cache(seq_len=self.max_position_embeddings, device=None, dtype=self.cache_dtype)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
-        inv_freq = torch.arange(0, self.dim, 2, device="meta", dtype=self.cache_dtype)
+        inv_freq = torch.arange(0, self.dim, 2, device=device, dtype=self.cache_dtype)
         inv_freq = 1.0 / (self.rope_theta ** (inv_freq / self.dim))
 
-        t = torch.arange(self.max_seq_len_cached, device="meta", dtype=self.cache_dtype)
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.cache_dtype)
 
         if self.scaling_factor is not None:
             t = t / self.scaling_factor
@@ -105,7 +105,7 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -390,6 +390,33 @@ class ModernGPT2PreTrainedModel(PreTrainedModel):
 
 @dataclass
 class ModernGPT2DoubleHeadsModelOutput(ModelOutput):
+    """
+    Base class for outputs of models predicting if two sentences are consecutive or not.
+
+    Args:
+        loss (`Optional[torch.FloatTensor]` of shape `(1,)`, *optional*, returned when `labels` is provided):
+            Language modeling loss.
+        mc_loss (`Optional[torch.FloatTensor]` of shape `(1,)`, *optional*, returned when `mc_labels` is provided):
+            Multiple choice classification loss.
+        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+        mc_logits (`torch.FloatTensor` of shape `(batch_size, num_choices)`):
+            Prediction scores of the multiple choice classification head (scores for each choice before SoftMax).
+        past_key_values (`Optional[Cache]`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Contains pre-computed hidden-states (key and values in the attention blocks) that can be used to speed up
+            sequential decoding.
+        hidden_states (`Optional[Tuple[torch.FloatTensor]]`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the initial embedding outputs.
+        attentions (`Optional[Tuple[torch.FloatTensor]]`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
     loss: Optional[torch.FloatTensor] = None
     mc_loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
@@ -599,12 +626,40 @@ class ModernGPT2Model(ModernGPT2PreTrainedModel):
         position_embeddings = (cos,sin)
         hidden_states = inputs_embeds * (self.config.n_embd**0.5)
 
-        if attention_mask is not None:
-            if batch_size <= 0:
-                raise ValueError("batch_size has to be defined and > 0")
-            attention_mask = AttentionMaskConverter._create_4d_causal_attention_mask(
-                input_shape, hidden_states.dtype, device=device, past_key_values_length=past_key_values.get_seq_length() if past_key_values is not None and isinstance(past_key_values, Cache) else 0
+        # Determine past_key_values_length
+        past_key_values_length = 0
+        if past_key_values is not None:
+            if isinstance(past_key_values, Cache):
+                past_key_values_length = past_key_values.get_seq_length()
+            else: # Assuming tuple cache
+                past_key_values_length = past_key_values[0][0].shape[2]
+
+        # Standard Hugging Face logic for preparing 4D attention mask for causal decoder
+        # The input `attention_mask` to this function is the 2D padding mask.
+        # We are creating `model_attention_mask` for the transformer blocks.
+        if input_shape[-1] > 1: # Sequence length > 1
+            causal_mask = AttentionMaskConverter._make_causal_mask(
+                input_shape,
+                hidden_states.dtype,
+                device=hidden_states.device, # Use hidden_states.device for target device
+                past_key_values_length=past_key_values_length,
             )
+        else:
+            causal_mask = None
+
+        if attention_mask is not None: # If a 2D padding mask is provided
+            expanded_padding_mask = AttentionMaskConverter._expand_mask(
+                attention_mask, dtype=hidden_states.dtype, tgt_len=input_shape[-1]
+            ).to(hidden_states.device) # Use hidden_states.device
+
+            if causal_mask is not None:
+                model_attention_mask = causal_mask + expanded_padding_mask
+            else:
+                model_attention_mask = expanded_padding_mask
+        else: # No 2D padding mask, just use the causal mask
+            model_attention_mask = causal_mask
+
+        attention_mask = model_attention_mask
 
         head_mask = self.get_head_mask(head_mask, self.config.n_layer)
         hidden_states = self.drop(hidden_states)
@@ -966,6 +1021,46 @@ class ModernGPT2DoubleHeadsModel(ModernGPT2PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, ModernGPT2DoubleHeadsModelOutput]:
+        """
+        Args:
+            input_ids (`Optional[torch.LongTensor]` of shape `(batch_size, sequence_length)`, *optional*):
+                Indices of input sequence tokens in the vocabulary.
+                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+                [`PreTrainedTokenizer.__call__`] for details.
+                [What are input IDs?](../glossary#input-ids)
+            past_key_values (`Optional[Cache]`, *optional*):
+                Contains pre-computed hidden-states (key and values in the attention blocks) that can be used (see
+                `past_key_values` input) to speed up sequential decoding.
+                [Standard past_key_values description]
+            attention_mask (`Optional[torch.FloatTensor]` of shape `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+                - 1 for tokens that are **not masked**,
+                - 0 for tokens that are **masked**.
+                [What are attention masks?](../glossary#attention-mask)
+            mc_token_ids (`Optional[torch.LongTensor]` of shape `(batch_size, num_choices)`, *optional*):
+                Indices of the multiple choice classification tokens in the input sequence. This is used to
+                gather the hidden states of chosen tokens for the multiple choice classification head. For example,
+                if `batch_size` is 3 and `num_choices` is 4, and `mc_token_ids` is `[[0, 1, 0, 1], [2, 0, 1, 2], [1, 1, 0, 0]]`,
+                this will gather the hidden states at these token indices for each example and choice.
+            labels (`Optional[torch.LongTensor]` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
+                `labels = input_ids`. Further note that `labels` is not used in the calculation of the loss if
+                `lm_head` is not defined.
+            mc_labels (`Optional[torch.LongTensor]` of shape `(batch_size,)`, *optional*):
+                Labels for the multiple choice classification task. Provides the index of the correct choice for
+                each example in the batch.
+            use_cache (`Optional[bool]`, *optional*):
+                Whether or not the model should return the last key/values attentions (not used by all models).
+                [Standard use_cache description]
+            output_attentions (`Optional[bool]`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+            output_hidden_states (`Optional[bool]`, *optional*):
+                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
+                for more detail.
+            return_dict (`Optional[bool]`, *optional*):
+                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+        """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         transformer_outputs = self.transformer(

@@ -160,19 +160,24 @@ def main():
         "--byte_fallback=true",  # Enable byte fallback for out-of-vocabulary characters
     ]
     
-    # Add user-defined special tokens (control symbols in SentencePiece)
-    # Skip tokens with special characters that cause issues with SentencePiece command line parsing
-    # These will be handled later in the tokenizer configuration
+    # Add user-defined special tokens.
+    # These tokens are added to the vocabulary by SentencePiece directly.
+    # Filter out tokens that SPM handles via specific parameters (e.g. <unk>)
+    # or that might cause issues if passed explicitly as user_defined_symbols.
+    spm_reserved_tokens = {"<unk>"}  # Add other SPM-specific tokens like <s>, </s>, <pad> if they are managed by specific params
+
+    filtered_user_defined_symbols = []
     if args.special_tokens:
-        # Filter out built-in tokens and problematic tokens
-        control_symbols = []
         for token in args.special_tokens:
-            if token not in ["<unk>", "<pad>"] and "|" not in token:
-                control_symbols.append(token)
-        
-        if control_symbols:
-            control_symbols_str = ",".join(control_symbols)
-            spm_train_args.append(f"--control_symbols={control_symbols_str}")
+            if token not in spm_reserved_tokens:
+                filtered_user_defined_symbols.append(token)
+
+    if filtered_user_defined_symbols:
+        # SentencePiece expects a comma-separated string for user_defined_symbols.
+        # It's important that args.vocab_size is set large enough to accommodate these
+        # in addition to the tokens learned from data.
+        user_defined_symbols_str = ",".join(filtered_user_defined_symbols)
+        spm_train_args.append(f"--user_defined_symbols={user_defined_symbols_str}")
     
     # Train the model
     spm.SentencePieceTrainer.train(" ".join(spm_train_args))
@@ -245,8 +250,9 @@ def main():
         "eos_token": "<|endoftext|>",
         "model_max_length": 1024,
         "pad_token": "<pad>",
-        "tokenizer_class": "ModernGPT2Tokenizer",
+        "tokenizer_class": "ModernGPT2Tokenizer",  # Just the class name
         "unk_token": "<unk>"
+        # auto_map is removed.
     }
     
     # Save tokenizer config
@@ -272,6 +278,27 @@ def main():
     
     logger.info(f"Tokenizer training and saving complete. Files are in {args.output_path}")
     logger.info(f"To use this tokenizer with train.py or dataset.py, point --tokenizer_path to '{args.output_path}'")
+
+    logger.info(f"Tokenizer training and saving complete. Files are in {args.output_path}")
+    logger.info(f"To use this tokenizer with train.py or dataset.py, point --tokenizer_path to '{args.output_path}'")
+
+    # Copy the ModernGPT2Tokenizer class definition file to the output directory
+    # and rename it for clarity with auto_map.
+    tokenizer_class_def_source_file = os.path.join(os.path.dirname(__file__), "moderngpt2", "tokenization_moderngpt2.py")
+    # The destination filename *must* be what's referenced in auto_map (e.g., custom_tokenizer_code.py)
+    tokenizer_class_def_dest_file = os.path.join(args.output_path, "custom_tokenizer_code.py") # Keep this name for the .py file
+
+    if os.path.exists(tokenizer_class_def_source_file):
+        shutil.copy2(tokenizer_class_def_source_file, tokenizer_class_def_dest_file)
+        logger.info(f"Copied '{tokenizer_class_def_source_file}' to {tokenizer_class_def_dest_file} for trust_remote_code support.")
+
+        # Remove __init__.py creation if it exists from previous attempts
+        init_py_path = os.path.join(args.output_path, "__init__.py")
+        if os.path.exists(init_py_path):
+            os.remove(init_py_path)
+            logger.info(f"Removed '{init_py_path}' if it existed.")
+    else:
+        logger.warning(f"Tokenizer class definition file '{tokenizer_class_def_source_file}' not found. Cannot copy for trust_remote_code.")
 
 if __name__ == "__main__":
     main()

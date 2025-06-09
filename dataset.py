@@ -1,7 +1,7 @@
 import torch
 from itertools import islice
 from datasets import load_dataset, interleave_datasets
-from transformers import ModernGPT2TokenizerFast
+from moderngpt2 import ModernGPT2Tokenizer
 from transformers.utils import logging
 import glob # Add glob for finding parquet files
 import os # Add os for path join
@@ -11,7 +11,7 @@ logger = logging.get_logger(__name__)
 def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000):
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
     try:
-        tokenizer = ModernGPT2TokenizerFast.from_pretrained(tokenizer_path)
+        tokenizer = ModernGPT2Tokenizer.from_pretrained(tokenizer_path)
     except Exception as e:
         logger.error(f"Could not load tokenizer from {tokenizer_path}. Error: {e}")
         raise
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     # Common setup for tokenizer
     tokenizer_directory = "dummy_tokenizer_for_dataset_testing"
     try:
-        ModernGPT2TokenizerFast.from_pretrained(tokenizer_directory)
+        ModernGPT2Tokenizer.from_pretrained(tokenizer_directory)
         logger.info(f"Found existing tokenizer at {tokenizer_directory}")
     except Exception:
         logger.info(f"Tokenizer not found at {tokenizer_directory}. Creating a dummy gpt2 tokenizer for testing.")

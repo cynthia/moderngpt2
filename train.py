@@ -3,10 +3,12 @@ import torch
 from itertools import islice
 
 from dataset import get_dataset # Added import
-from transformers import (
+from moderngpt2 import (
     ModernGPT2Config,
     ModernGPT2LMHeadModel,
-    ModernGPT2TokenizerFast,
+    ModernGPT2Tokenizer,
+)
+from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
@@ -21,8 +23,8 @@ logger = logging.get_logger(__name__)
 #   "optimizer": { "type": "AdamW", "params": { "lr": "auto"}},
 #   "fp16": { "enabled": true }
 # }
-# Launch with: accelerate launch --config_file accelerate_config.yaml train.py --deepspeed_config ds_config.json ...
-# Or: deepspeed train.py --deepspeed --deepspeed_config ds_config.json ...
+# Launch with: accelerate launch --config_file accelerate_config.yaml train.py --ds_config ds_config.json ...
+# Or: deepspeed train.py --deepspeed --deepspeed_config ds_config.json --ds_config ds_config.json ...
 
 def main():
     parser = argparse.ArgumentParser(description="Train ModernGPT2 Model")
@@ -59,8 +61,8 @@ def main():
     parser.add_argument("--save_steps", type=int, default=5000, help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_steps", type=int, default=500, help="Evaluate every X updates steps.")
     parser.add_argument("--save_total_limit", type=int, default=10, help="Limit the total number of checkpoints.")
-    parser.add_argument("--report_to", type=str, default="wandb", help="Report metrics to (e.g., 'wandb', 'tensorboard').")
-    parser.add_argument("--deepspeed_config", type=str, default=None, help="Path to DeepSpeed config JSON.")
+    parser.add_argument("--report_to", type=str, default="none", help="Report metrics to (e.g., 'wandb', 'tensorboard', 'none'). Default: 'none'.")
+    parser.add_argument("--ds_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
     parser.add_argument(
         "--streaming_eval_samples", type=int, default=1000, help="Number of samples for streaming evaluation."
     )
@@ -71,8 +73,15 @@ def main():
         default=None,
         help="Path to a directory containing pre-tokenized Parquet files. If provided, C4 streaming is skipped.",
     )
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training. Passed by launch script.")
+    parser.add_argument("--fp16", action="store_true", help="Enable mixed precision training (fp16).")
+    parser.add_argument("--bf16", action="store_true", help="Enable mixed precision training with bfloat16 (requires Ampere or newer GPU). Mutually exclusive with --fp16.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.")
 
     args = parser.parse_args()
+
+    if args.fp16 and args.bf16:
+        raise ValueError("Cannot use both --fp16 and --bf16 flags simultaneously. Please choose one.")
 
     # Setup logging
     logging.set_verbosity_info()
@@ -85,11 +94,12 @@ def main():
         f"Loading dataset. Tokenizer: {args.tokenizer_path}, Block size: {args.block_size}, "
         f"Pre-tokenized path: {args.pre_tokenized_dataset_path if args.pre_tokenized_dataset_path else 'Not provided (using C4 streaming)'}"
     )
+    streaming_dataset = not args.pre_tokenized_dataset_path  # True if using C4, False if using pre-tokenized
     train_dataset, eval_dataset, tokenizer = get_dataset(
         tokenizer_path=args.tokenizer_path,
-        block_size=args.block_size, # Still needed for C4 streaming, or if model config depends on it
-        streaming=True, # This 'streaming' arg in get_dataset applies to C4 or Parquet if supported
-        pre_tokenized_path=args.pre_tokenized_dataset_path, # Pass the new argument here
+        block_size=args.block_size,
+        streaming=streaming_dataset,
+        pre_tokenized_path=args.pre_tokenized_dataset_path,
         streaming_eval_samples=args.streaming_eval_samples
     )
     # --- END ADDITION ---
@@ -124,11 +134,13 @@ def main():
         weight_decay=args.weight_decay,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        evaluation_strategy="steps", # Evaluate at eval_steps
         eval_steps=args.eval_steps,
         save_total_limit=args.save_total_limit,
         report_to=args.report_to if args.report_to != "none" else None, # Handle "none" case
-        deepspeed=args.deepspeed_config,
+        deepspeed=args.ds_config,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         # Other arguments like adam_beta1, adam_beta2, lr_scheduler_type can be added if needed
         # For streaming, max_steps might be more appropriate than num_train_epochs depending on dataset size.
         # If the dataset is truly infinite or very large, set max_steps.

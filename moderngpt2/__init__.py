@@ -14,24 +14,70 @@
 from typing import TYPE_CHECKING
 
 from transformers.utils import _LazyModule
-from transformers.utils.import_utils import define_import_structure
 
+
+_import_structure = {
+    "configuration_moderngpt2": ["ModernGPT2Config", "ModernGPT2OnnxConfig"],
+    "modeling_moderngpt2": [
+        "ModernGPT2Model",
+        "ModernGPT2LMHeadModel",
+        "ModernGPT2DoubleHeadsModel",
+        "ModernGPT2ForSequenceClassification",
+        "ModernGPT2ForTokenClassification",
+        "ModernGPT2ForQuestionAnswering",
+        "ModernGPT2PreTrainedModel",
+        "load_tf_weights_in_moderngpt2",
+    ],
+    "modeling_flax_moderngpt2": [
+        "FlaxModernGPT2Model",
+        "FlaxModernGPT2LMHeadModel",
+        "FlaxModernGPT2PreTrainedModel",
+    ],
+    "modeling_tf_moderngpt2": [
+        "TFModernGPT2Model",
+        "TFModernGPT2LMHeadModel",
+        "TFModernGPT2DoubleHeadsModel",
+        "TFModernGPT2ForSequenceClassification",
+        "TFGPT2PreTrainedModel",
+        "TFModernGPT2MainLayer",
+    ],
+    "tokenization_moderngpt2": ["ModernGPT2Tokenizer"],
+    "tokenization_moderngpt2_fast": ["ModernGPT2TokenizerFast"],
+}
 
 if TYPE_CHECKING:
-    from transformers.models.moderngpt2.configuration_moderngpt2 import *
-    from transformers.models.moderngpt2.modeling_flax_moderngpt2 import *
-    from transformers.models.moderngpt2.modeling_moderngpt2 import *
-    from transformers.models.moderngpt2.modeling_tf_moderngpt2 import *
-    # MODIFIED: For renamed tokenizers
-    from transformers.models.moderngpt2.tokenization_moderngpt2 import ModernGPT2Tokenizer
-    from transformers.models.moderngpt2.tokenization_moderngpt2_fast import ModernGPT2TokenizerFast
-    # Original GPT2 tokenizers, if they are to co-exist or be deprecated later
-    # For now, keeping them as per the TODOs, assuming they are distinct or placeholders
-    from transformers.models.moderngpt2.tokenization_gpt2 import *
-    from transformers.models.moderngpt2.tokenization_gpt2_fast import *
-    from transformers.models.moderngpt2.tokenization_gpt2_tf import *
+    from .configuration_moderngpt2 import ModernGPT2Config, ModernGPT2OnnxConfig
+    from .modeling_moderngpt2 import (
+        ModernGPT2Model,
+        ModernGPT2LMHeadModel,
+        ModernGPT2DoubleHeadsModel,
+        ModernGPT2ForSequenceClassification,
+        ModernGPT2ForTokenClassification,
+        ModernGPT2ForQuestionAnswering,
+        ModernGPT2PreTrainedModel,
+        load_tf_weights_in_moderngpt2,
+    )
+    from .modeling_flax_moderngpt2 import (
+        FlaxModernGPT2Model,
+        FlaxModernGPT2LMHeadModel,
+        FlaxModernGPT2PreTrainedModel,
+    )
+    from .modeling_tf_moderngpt2 import (
+        TFModernGPT2Model,
+        TFModernGPT2LMHeadModel,
+        TFModernGPT2DoubleHeadsModel,
+        TFModernGPT2ForSequenceClassification,
+        TFGPT2PreTrainedModel,
+        TFModernGPT2MainLayer,
+    )
+    from .tokenization_moderngpt2 import ModernGPT2Tokenizer
+    from .tokenization_moderngpt2_fast import ModernGPT2TokenizerFast
 else:
     import sys
 
-    _file = globals()["__file__"]
-    sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)
+    sys.modules[__name__] = _LazyModule(
+        __name__,
+        globals()["__file__"],
+        _import_structure,
+        module_spec=__spec__,
+    )
