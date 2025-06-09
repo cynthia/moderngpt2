@@ -1,9 +1,11 @@
 import argparse
 import os
+import tempfile
 from datasets import load_dataset, interleave_datasets
-from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers
-from tokenizers.processors import TemplateProcessing
-from transformers.utils import logging # For logger if needed
+import sentencepiece as spm
+from transformers import PreTrainedTokenizerFast
+from transformers.utils import logging
+from tokenizers import Tokenizer
 
 logger = logging.get_logger(__name__)
 
@@ -50,59 +52,40 @@ def main():
         "--special_tokens",
         type=str,
         nargs='+',
-        default=["<|endoftext|>", "<unk>", "<pad>"], # Common special tokens
-        help="List of special tokens to add to the tokenizer. <|endoftext|> is typical for GPT. <unk> for unknown, <pad> for padding."
+        default=[
+            "<|endoftext|>", "<unk>", "<pad>",
+            # Instruction fine-tuning tokens
+            "<|system|>", "<|user|>", "<|assistant|>",
+            "<|begin_of_text|>", "<|end_of_text|>",
+            "<|start_header_id|>", "<|end_header_id|>",
+            "<|eot_id|>",  # End of turn
+            "<|reserved_special_token_0|>", "<|reserved_special_token_1|>",
+            "<|reserved_special_token_2|>", "<|reserved_special_token_3|>",
+        ],
+        help="List of special tokens to add to the tokenizer. Includes common tokens and instruction fine-tuning tokens."
     )
-
+    parser.add_argument(
+        "--character_coverage",
+        type=float,
+        default=0.9995,
+        help="Character coverage for SentencePiece. Default is 0.9995 (99.95%)",
+    )
+    parser.add_argument(
+        "--max_sentence_length",
+        type=int,
+        default=16384,
+        help="Maximum sentence length for SentencePiece training",
+    )
 
     args = parser.parse_args()
 
     # Setup logging
     logging.set_verbosity_info()
 
-    logger.info("Initializing a new Tokenizer with SentencePiece Unigram model.")
-    gpt2_tokenizer = Tokenizer(models.Unigram())
-
-    gpt2_tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
-    gpt2_tokenizer.decoder = decoders.ByteLevel()
-
-    eos_token_str = args.special_tokens[0] if args.special_tokens and "<|endoftext|>" in args.special_tokens else "<|endoftext|>"
-    if eos_token_str not in args.special_tokens: # Ensure EOS token is part of special_tokens list for the trainer
-        # This case should ideally be handled by ensuring user includes it or has a sensible default.
-        # For robustness, if <|endoftext|> is not in custom list, we add it for post-processor,
-        # but this might conflict if user intends a different EOS.
-        # Safest is to rely on args.special_tokens containing the intended EOS.
-        # Let's assume the first token in args.special_tokens is the primary EOS for simplicity.
-        eos_token_str = args.special_tokens[0] if args.special_tokens else "<|endoftext|>"
-
-
-    # Ensure special_tokens are correctly mapped for TemplateProcessing
-    # The ID for TemplateProcessing should be its final ID in the tokenizer after training.
-    # We add special tokens to the trainer, which assigns them IDs starting from 0.
-    # So, we can find the index of eos_token_str in args.special_tokens to get its presumed ID for template.
-    try:
-        eos_token_id = args.special_tokens.index(eos_token_str)
-    except ValueError:
-        # This would happen if eos_token_str (e.g. default <|endoftext|>) isn't in a custom args.special_tokens list
-        logger.warning(f"EOS token '{eos_token_str}' not found in special_tokens list: {args.special_tokens}. Using ID {len(args.special_tokens)} as a fallback for template.")
-        # Add it to the list for the trainer if not present, and assign it the next available ID.
-        if eos_token_str not in args.special_tokens:
-            args.special_tokens.append(eos_token_str)
-        eos_token_id = len(args.special_tokens) -1
-
-
-    gpt2_tokenizer.post_processor = TemplateProcessing(
-        single=f"$A {eos_token_str}",
-        pair=f"$A {eos_token_str} $B:1 {eos_token_str}:1",
-        special_tokens=[
-            (eos_token_str, eos_token_id)
-        ]
-    )
-
     logger.info("Loading and preparing C4 dataset for tokenizer training...")
     langs = ["en", "ja", "ko", "zh"]
 
-    datasets_list_processed = [] # Use a new name for the processed list
+    datasets_list_processed = []
     for lang in langs:
         logger.info(f"Loading C4/{lang} for tokenizer training...")
         dset = load_dataset("allenai/c4", lang, streaming=True, split="train", trust_remote_code=True)
@@ -116,47 +99,177 @@ def main():
             logger.warning(f"Could not dynamically determine columns for C4/{lang} due to: {e}. "
                            "Falling back to a predefined list of common columns to remove.")
             # Common columns in C4 that are not 'text'
-            columns_to_remove = ['timestamp', 'url', 'c4_language', 'metadata'] # Added 'metadata' as another potential one
-            # Ensure 'text' is not in the list of columns to remove, just in case.
+            columns_to_remove = ['timestamp', 'url', 'c4_language', 'metadata']
             columns_to_remove = [col for col in columns_to_remove if col != 'text']
 
         if columns_to_remove:
             logger.info(f"For C4/{lang}, attempting to remove columns: {columns_to_remove} to keep only 'text' for feature alignment.")
-            # The map function will ignore any column in remove_columns that doesn't actually exist in the dataset.
             dset = dset.map(lambda x: x, batched=True, remove_columns=columns_to_remove)
 
         datasets_list_processed.append(dset)
 
     logger.info("Interleaving datasets...")
-    # Pass the list of processed datasets to interleave_datasets
     interleaved_ds = interleave_datasets(datasets_list_processed)
 
     logger.info(f"Taking approx {args.max_train_lines} lines for tokenizer training.")
     training_data_subset = interleaved_ds.take(args.max_train_lines)
 
-    trainer = trainers.UnigramTrainer(
-        vocab_size=args.vocab_size,
-        special_tokens=args.special_tokens,
-        unk_token="<unk>" if "<unk>" in args.special_tokens else None,
-        byte_fallback=True,
-    )
+    # Create a temporary file to store training data for SentencePiece
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_file:
+        tmp_filename = tmp_file.name
+        logger.info(f"Writing training data to temporary file: {tmp_filename}")
+        
+        line_count = 0
+        for batch in dataset_text_iterator(training_data_subset, batch_size=args.text_iterator_batch_size):
+            for text in batch:
+                tmp_file.write(text + '\n')
+                line_count += 1
+                if line_count >= args.max_train_lines:
+                    break
+            if line_count >= args.max_train_lines:
+                break
+        
+        logger.info(f"Wrote {line_count} lines to temporary file")
 
-    logger.info("Starting tokenizer training...")
-    gpt2_tokenizer.train_from_iterator(
-        dataset_text_iterator(training_data_subset, batch_size=args.text_iterator_batch_size),
-        trainer=trainer,
-        length=args.max_train_lines
-    )
-    logger.info("Tokenizer training finished.")
-
+    # Train SentencePiece model
+    logger.info("Starting SentencePiece tokenizer training...")
+    
+    # Create output directory if it doesn't exist
     if not os.path.exists(args.output_path):
         os.makedirs(args.output_path)
         logger.info(f"Created output directory: {args.output_path}")
-
-    tokenizer_json_path = os.path.join(args.output_path, "tokenizer.json")
-    gpt2_tokenizer.save(tokenizer_json_path)
-    logger.info(f"Tokenizer saved to {tokenizer_json_path}")
-
+    
+    # Prepare SentencePiece model prefix
+    model_prefix = os.path.join(args.output_path, "spm")
+    
+    # Build SentencePiece training arguments
+    spm_train_args = [
+        f"--input={tmp_filename}",
+        f"--model_prefix={model_prefix}",
+        f"--vocab_size={args.vocab_size}",
+        "--model_type=unigram",
+        f"--character_coverage={args.character_coverage}",
+        f"--max_sentence_length={args.max_sentence_length}",
+        "--pad_id=0",
+        "--unk_id=1",
+        "--bos_id=-1",  # Don't use BOS
+        "--eos_id=2",
+        "--pad_piece=<pad>",
+        "--unk_piece=<unk>",
+        "--normalization_rule_name=identity",  # No normalization to preserve original text
+        "--byte_fallback=true",  # Enable byte fallback for out-of-vocabulary characters
+    ]
+    
+    # Add user-defined special tokens (control symbols in SentencePiece)
+    # Skip tokens with special characters that cause issues with SentencePiece command line parsing
+    # These will be handled later in the tokenizer configuration
+    if args.special_tokens:
+        # Filter out built-in tokens and problematic tokens
+        control_symbols = []
+        for token in args.special_tokens:
+            if token not in ["<unk>", "<pad>"] and "|" not in token:
+                control_symbols.append(token)
+        
+        if control_symbols:
+            control_symbols_str = ",".join(control_symbols)
+            spm_train_args.append(f"--control_symbols={control_symbols_str}")
+    
+    # Train the model
+    spm.SentencePieceTrainer.train(" ".join(spm_train_args))
+    logger.info("SentencePiece tokenizer training finished.")
+    
+    # Clean up temporary file
+    os.unlink(tmp_filename)
+    logger.info(f"Cleaned up temporary file: {tmp_filename}")
+    
+    # Load the trained SentencePiece model
+    sp = spm.SentencePieceProcessor()
+    sp.load(f"{model_prefix}.model")
+    
+    # Create HuggingFace-compatible tokenizer using the custom ModernGPT2Tokenizer
+    logger.info("Creating HuggingFace-compatible tokenizer configuration...")
+    
+    # Copy the SentencePiece model file to the output directory with standard name
+    import shutil
+    target_model_path = os.path.join(args.output_path, "tokenizer.model")
+    shutil.copy2(f"{model_prefix}.model", target_model_path)
+    logger.info(f"Copied SentencePiece model to {target_model_path}")
+    
+    # Create tokenizer configuration
+    from moderngpt2.tokenization_moderngpt2 import ModernGPT2Tokenizer
+    
+    # Prepare special token mapping for tokenizer config
+    special_token_mapping = {}
+    added_tokens_decoder = {}
+    additional_special_tokens = []
+    
+    # Standard tokens
+    standard_tokens = {
+        "<pad>": sp.piece_to_id("<pad>"),
+        "<unk>": sp.piece_to_id("<unk>"),
+        "<|endoftext|>": sp.piece_to_id("</s>")  # Use EOS token as fallback
+    }
+    
+    for token, token_id in standard_tokens.items():
+        if token_id != sp.unk_id():  # Only add if token exists in vocabulary
+            added_tokens_decoder[str(token_id)] = {
+                "content": token,
+                "lstrip": False,
+                "normalized": False,
+                "rstrip": False,
+                "single_word": False,
+                "special": True
+            }
+    
+    # Additional special tokens
+    if args.special_tokens:
+        for token in args.special_tokens:
+            if token not in ["<unk>", "<pad>", "<|endoftext|>"]:
+                token_id = sp.piece_to_id(token)
+                if token_id != sp.unk_id():  # Only add if token exists in vocabulary
+                    added_tokens_decoder[str(token_id)] = {
+                        "content": token,
+                        "lstrip": False,
+                        "normalized": False,
+                        "rstrip": False,
+                        "single_word": False,
+                        "special": True
+                    }
+                    additional_special_tokens.append(token)
+    
+    # Create tokenizer_config.json
+    tokenizer_config = {
+        "added_tokens_decoder": added_tokens_decoder,
+        "additional_special_tokens": additional_special_tokens,
+        "clean_up_tokenization_spaces": False,
+        "eos_token": "<|endoftext|>",
+        "model_max_length": 1024,
+        "pad_token": "<pad>",
+        "tokenizer_class": "ModernGPT2Tokenizer",
+        "unk_token": "<unk>"
+    }
+    
+    # Save tokenizer config
+    import json
+    with open(os.path.join(args.output_path, "tokenizer_config.json"), "w") as f:
+        json.dump(tokenizer_config, f, indent=2)
+    
+    # Create special_tokens_map.json
+    special_tokens_map = {
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<pad>",
+        "unk_token": "<unk>"
+    }
+    
+    with open(os.path.join(args.output_path, "special_tokens_map.json"), "w") as f:
+        json.dump(special_tokens_map, f, indent=2)
+    
+    logger.info(f"Tokenizer saved to {args.output_path} (compatible with ModernGPT2Tokenizer)")
+    logger.info(f"Special tokens included: {args.special_tokens}")
+    
+    # Also keep the original SentencePiece files
+    logger.info(f"Original SentencePiece model files: {model_prefix}.model and {model_prefix}.vocab")
+    
     logger.info(f"Tokenizer training and saving complete. Files are in {args.output_path}")
     logger.info(f"To use this tokenizer with train.py or dataset.py, point --tokenizer_path to '{args.output_path}'")
 
