@@ -202,7 +202,7 @@ def main():
         "tf32": args.tf32,
         "gradient_checkpointing": args.gradient_checkpointing,
         # Optimizer settings for better performance
-        "optim": "adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
+        "optim": "adamw_torch",
         "adam_beta1": 0.9,
         "adam_beta2": 0.95,
         "adam_epsilon": 1e-8,
