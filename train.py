@@ -1,6 +1,7 @@
 import argparse
 import torch
 from itertools import islice
+import os
 
 from dataset import get_dataset # Added import
 from moderngpt2 import (
@@ -73,10 +74,26 @@ def main():
         default=None,
         help="Path to a directory containing pre-tokenized Parquet files. If provided, C4 streaming is skipped.",
     )
+    parser.add_argument(
+        "--metadata_file",
+        type=str,
+        default=None,
+        help="Path to YAML metadata file containing train/eval parquet file lists. Takes precedence over pre_tokenized_dataset_path.",
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training. Passed by launch script.")
     parser.add_argument("--fp16", action="store_true", help="Enable mixed precision training (fp16).")
     parser.add_argument("--bf16", action="store_true", help="Enable mixed precision training with bfloat16 (requires Ampere or newer GPU). Mutually exclusive with --fp16.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument("--tf32", type=bool, default=True, help="Enable TF32 on Ampere GPUs for faster training.")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing to save memory.")
+    parser.add_argument("--torch_compile", action="store_true", help="Enable torch.compile for model optimization.")
+    parser.add_argument("--torch_compile_backend", type=str, default="inductor", help="Backend for torch.compile.")
+    parser.add_argument("--torch_compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune"], help="Compilation mode for torch.compile.")
+    parser.add_argument("--dataloader_num_workers", type=int, default=4, help="Number of data loading workers.")
+    parser.add_argument("--dataloader_prefetch_factor", type=int, default=2, help="Number of batches to prefetch per worker.")
+    parser.add_argument("--dataloader_pin_memory", action="store_true", help="Pin memory for faster GPU transfer.")
+    parser.add_argument("--warmup_steps", type=int, default=None, help="Number of warmup steps. Overrides warmup_ratio if set.")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping.")
 
     args = parser.parse_args()
 
@@ -85,22 +102,40 @@ def main():
 
     # Setup logging
     logging.set_verbosity_info()
+    
+    # Enable TF32 for Ampere GPUs
+    if args.tf32 and torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        logger.info("TF32 enabled for matrix multiplications")
+    
+    # Set NCCL environment variables for better multi-GPU performance
+    if torch.cuda.device_count() > 1:
+        os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+        os.environ.setdefault('NCCL_TIMEOUT', '1800')  # 30 minutes
 
     # --- REMOVED OLD TOKENIZER LOADING ---
     # --- REMOVED OLD DATASET HANDLING ---
 
     # --- ADD NEW DATASET AND TOKENIZER LOADING ---
-    logger.info(
-        f"Loading dataset. Tokenizer: {args.tokenizer_path}, Block size: {args.block_size}, "
-        f"Pre-tokenized path: {args.pre_tokenized_dataset_path if args.pre_tokenized_dataset_path else 'Not provided (using C4 streaming)'}"
-    )
-    streaming_dataset = not args.pre_tokenized_dataset_path  # True if using C4, False if using pre-tokenized
+    if args.metadata_file:
+        logger.info(
+            f"Loading dataset from metadata file: {args.metadata_file}, Tokenizer: {args.tokenizer_path}"
+        )
+    else:
+        logger.info(
+            f"Loading dataset. Tokenizer: {args.tokenizer_path}, Block size: {args.block_size}, "
+            f"Pre-tokenized path: {args.pre_tokenized_dataset_path if args.pre_tokenized_dataset_path else 'Not provided (using C4 streaming)'}"
+        )
+    
+    streaming_dataset = not (args.pre_tokenized_dataset_path or args.metadata_file)  # True if using C4, False if using pre-tokenized or metadata
     train_dataset, eval_dataset, tokenizer = get_dataset(
         tokenizer_path=args.tokenizer_path,
         block_size=args.block_size,
         streaming=streaming_dataset,
         pre_tokenized_path=args.pre_tokenized_dataset_path,
-        streaming_eval_samples=args.streaming_eval_samples
+        streaming_eval_samples=args.streaming_eval_samples,
+        metadata_file=args.metadata_file
     )
     # --- END ADDITION ---
 
@@ -121,6 +156,20 @@ def main():
         config.vocab_size = tokenizer.vocab_size
 
     model = ModernGPT2LMHeadModel(config)
+    
+    # Enable gradient checkpointing if requested
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled")
+    
+    # Apply torch.compile if requested and available
+    if args.torch_compile and hasattr(torch, 'compile'):
+        logger.info(f"Compiling model with torch.compile (backend={args.torch_compile_backend}, mode={args.torch_compile_mode})")
+        model = torch.compile(
+            model, 
+            backend=args.torch_compile_backend,
+            mode=args.torch_compile_mode
+        )
 
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
@@ -130,7 +179,8 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
+        warmup_ratio=args.warmup_ratio if args.warmup_steps is None else 0,
+        warmup_steps=args.warmup_steps if args.warmup_steps is not None else None,
         weight_decay=args.weight_decay,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
@@ -141,6 +191,17 @@ def main():
         fp16=args.fp16,
         bf16=args.bf16,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_prefetch_factor=args.dataloader_prefetch_factor,
+        dataloader_pin_memory=args.dataloader_pin_memory,
+        max_grad_norm=args.max_grad_norm,
+        tf32=args.tf32,
+        gradient_checkpointing=args.gradient_checkpointing,
+        # Optimizer settings for better performance
+        optim="adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        adam_epsilon=1e-8,
         # Other arguments like adam_beta1, adam_beta2, lr_scheduler_type can be added if needed
         # For streaming, max_steps might be more appropriate than num_train_epochs depending on dataset size.
         # If the dataset is truly infinite or very large, set max_steps.

@@ -1,14 +1,15 @@
 import torch
 from itertools import islice
-from datasets import load_dataset, interleave_datasets
+from datasets import load_dataset, interleave_datasets, concatenate_datasets
 from moderngpt2 import ModernGPT2Tokenizer
 from transformers.utils import logging
 import glob # Add glob for finding parquet files
 import os # Add os for path join
+import yaml # Add yaml for parsing metadata files
 
 logger = logging.get_logger(__name__)
 
-def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000):
+def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000, metadata_file: str = None):
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
     try:
         tokenizer = ModernGPT2Tokenizer.from_pretrained(tokenizer_path)
@@ -17,7 +18,76 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
         raise
     tokenizer.pad_token = tokenizer.eos_token
 
-    if pre_tokenized_path:
+    if metadata_file:
+        logger.info(f"Loading dataset configuration from metadata file: {metadata_file}")
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Failed to load metadata file {metadata_file}: {e}")
+            raise
+        
+        # Extract configuration
+        train_files = metadata.get('train', [])
+        eval_files = metadata.get('eval', [])
+        eval_size = metadata.get('eval_size', 10000)
+        
+        if not train_files:
+            raise ValueError("No training files specified in metadata file")
+        if not eval_files:
+            raise ValueError("No evaluation files specified in metadata file")
+        
+        logger.info(f"Found {len(train_files)} training files and {len(eval_files)} evaluation files")
+        logger.info(f"Evaluation size per file: {eval_size}")
+        
+        # Load training datasets in order and concatenate
+        train_datasets = []
+        for file_path in train_files:
+            if not os.path.exists(file_path):
+                logger.warning(f"Training file not found, skipping: {file_path}")
+                continue
+            logger.info(f"Loading training file: {file_path}")
+            ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+            train_datasets.append(ds)
+        
+        if not train_datasets:
+            raise ValueError("No valid training files found")
+        
+        # Concatenate all training datasets
+        train_dataset = concatenate_datasets(train_datasets)
+        logger.info(f"Total training samples: {len(train_dataset)}")
+        
+        # Load evaluation datasets with size limit
+        eval_datasets = []
+        for file_path in eval_files:
+            if not os.path.exists(file_path):
+                logger.warning(f"Evaluation file not found, skipping: {file_path}")
+                continue
+            logger.info(f"Loading evaluation file: {file_path}")
+            ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+            # Take only eval_size samples from each file
+            if len(ds) > eval_size:
+                ds = ds.select(range(eval_size))
+            eval_datasets.append(ds)
+        
+        if not eval_datasets:
+            raise ValueError("No valid evaluation files found")
+        
+        # Concatenate all evaluation datasets
+        eval_dataset = concatenate_datasets(eval_datasets)
+        logger.info(f"Total evaluation samples: {len(eval_dataset)}")
+        
+        # Verify columns
+        if 'input_ids' not in train_dataset.column_names or 'attention_mask' not in train_dataset.column_names:
+            raise ValueError(f"Training dataset must have 'input_ids' and 'attention_mask' columns. Found: {train_dataset.column_names}")
+        
+        # Add labels column if not present
+        if 'labels' not in train_dataset.column_names:
+            train_dataset = train_dataset.map(lambda x: {'labels': x['input_ids']}, batched=True)
+        if 'labels' not in eval_dataset.column_names:
+            eval_dataset = eval_dataset.map(lambda x: {'labels': x['input_ids']}, batched=True)
+        
+    elif pre_tokenized_path:
         logger.info(f"Attempting to load pre-tokenized dataset from: {pre_tokenized_path}")
         parquet_files = glob.glob(os.path.join(pre_tokenized_path, "*.parquet"))
 
