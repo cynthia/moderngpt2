@@ -6,10 +6,11 @@ from transformers.utils import logging
 import glob # Add glob for finding parquet files
 import os # Add os for path join
 import yaml # Add yaml for parsing metadata files
+from dataset_cache import DatasetCache, load_and_concatenate_datasets_with_cache
 
 logger = logging.get_logger(__name__)
 
-def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000, metadata_file: str = None):
+def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000, metadata_file: str = None, cache_dir: str = ".dataset_cache", use_cache: bool = True):
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -41,42 +42,64 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
         logger.info(f"Found {len(train_files)} training files and {len(eval_files)} evaluation files")
         logger.info(f"Evaluation size per file: {eval_size}")
         
-        # Load training datasets in order and concatenate
-        train_datasets = []
-        for file_path in train_files:
-            if not os.path.exists(file_path):
-                logger.warning(f"Training file not found, skipping: {file_path}")
-                continue
-            logger.info(f"Loading training file: {file_path}")
-            ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
-            train_datasets.append(ds)
+        # Load training datasets with caching support
+        if use_cache and not streaming:
+            train_dataset = load_and_concatenate_datasets_with_cache(
+                files=train_files,
+                cache_key=f"train_{os.path.basename(metadata_file)}",
+                eval_size=None,
+                cache_dir=cache_dir,
+                streaming=False
+            )
+            logger.info(f"Total training samples: {len(train_dataset)}")
+        else:
+            # Original non-cached loading
+            train_datasets = []
+            for file_path in train_files:
+                if not os.path.exists(file_path):
+                    logger.warning(f"Training file not found, skipping: {file_path}")
+                    continue
+                logger.info(f"Loading training file: {file_path}")
+                ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+                train_datasets.append(ds)
+            
+            if not train_datasets:
+                raise ValueError("No valid training files found")
+            
+            # Concatenate all training datasets
+            train_dataset = concatenate_datasets(train_datasets)
+            logger.info(f"Total training samples: {len(train_dataset)}")
         
-        if not train_datasets:
-            raise ValueError("No valid training files found")
-        
-        # Concatenate all training datasets
-        train_dataset = concatenate_datasets(train_datasets)
-        logger.info(f"Total training samples: {len(train_dataset)}")
-        
-        # Load evaluation datasets with size limit
-        eval_datasets = []
-        for file_path in eval_files:
-            if not os.path.exists(file_path):
-                logger.warning(f"Evaluation file not found, skipping: {file_path}")
-                continue
-            logger.info(f"Loading evaluation file: {file_path}")
-            ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
-            # Take only eval_size samples from each file
-            if len(ds) > eval_size:
-                ds = ds.select(range(eval_size))
-            eval_datasets.append(ds)
-        
-        if not eval_datasets:
-            raise ValueError("No valid evaluation files found")
-        
-        # Concatenate all evaluation datasets
-        eval_dataset = concatenate_datasets(eval_datasets)
-        logger.info(f"Total evaluation samples: {len(eval_dataset)}")
+        # Load evaluation datasets with caching support
+        if use_cache and not streaming:
+            eval_dataset = load_and_concatenate_datasets_with_cache(
+                files=eval_files,
+                cache_key=f"eval_{os.path.basename(metadata_file)}",
+                eval_size=eval_size,
+                cache_dir=cache_dir,
+                streaming=False
+            )
+            logger.info(f"Total evaluation samples: {len(eval_dataset)}")
+        else:
+            # Original non-cached loading
+            eval_datasets = []
+            for file_path in eval_files:
+                if not os.path.exists(file_path):
+                    logger.warning(f"Evaluation file not found, skipping: {file_path}")
+                    continue
+                logger.info(f"Loading evaluation file: {file_path}")
+                ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+                # Take only eval_size samples from each file
+                if len(ds) > eval_size:
+                    ds = ds.select(range(eval_size))
+                eval_datasets.append(ds)
+            
+            if not eval_datasets:
+                raise ValueError("No valid evaluation files found")
+            
+            # Concatenate all evaluation datasets
+            eval_dataset = concatenate_datasets(eval_datasets)
+            logger.info(f"Total evaluation samples: {len(eval_dataset)}")
         
         # Verify columns
         if 'input_ids' not in train_dataset.column_names or 'attention_mask' not in train_dataset.column_names:

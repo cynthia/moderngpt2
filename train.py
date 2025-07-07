@@ -94,6 +94,9 @@ def main():
     parser.add_argument("--dataloader_pin_memory", action="store_true", help="Pin memory for faster GPU transfer.")
     parser.add_argument("--warmup_steps", type=int, default=None, help="Number of warmup steps. Overrides warmup_ratio if set.")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping.")
+    parser.add_argument("--dataset_cache_dir", type=str, default=".dataset_cache", help="Directory to cache concatenated datasets.")
+    parser.add_argument("--use_dataset_cache", action="store_true", help="Enable dataset caching for faster subsequent runs.")
+    parser.add_argument("--clear_dataset_cache", action="store_true", help="Clear the dataset cache before training.")
 
     args = parser.parse_args()
 
@@ -118,10 +121,19 @@ def main():
     # --- REMOVED OLD DATASET HANDLING ---
 
     # --- ADD NEW DATASET AND TOKENIZER LOADING ---
+    # Clear cache if requested
+    if args.clear_dataset_cache:
+        from dataset_cache import DatasetCache
+        cache = DatasetCache(args.dataset_cache_dir)
+        cache.clear_cache()
+        logger.info("Dataset cache cleared")
+    
     if args.metadata_file:
         logger.info(
             f"Loading dataset from metadata file: {args.metadata_file}, Tokenizer: {args.tokenizer_path}"
         )
+        if args.use_dataset_cache:
+            logger.info(f"Dataset caching enabled, cache directory: {args.dataset_cache_dir}")
     else:
         logger.info(
             f"Loading dataset. Tokenizer: {args.tokenizer_path}, Block size: {args.block_size}, "
@@ -135,7 +147,9 @@ def main():
         streaming=streaming_dataset,
         pre_tokenized_path=args.pre_tokenized_dataset_path,
         streaming_eval_samples=args.streaming_eval_samples,
-        metadata_file=args.metadata_file
+        metadata_file=args.metadata_file,
+        cache_dir=args.dataset_cache_dir,
+        use_cache=args.use_dataset_cache
     )
     # --- END ADDITION ---
 
