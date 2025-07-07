@@ -7,7 +7,6 @@ from dataset import get_dataset # Added import
 from moderngpt2 import (
     ModernGPT2Config,
     ModernGPT2LMHeadModel,
-    ModernGPT2Tokenizer,
 )
 from transformers import (
     TrainingArguments,
@@ -180,40 +179,42 @@ def main():
     
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio if args.warmup_steps is None else 0,
-        warmup_steps=args.warmup_steps if args.warmup_steps is not None else None,
-        weight_decay=args.weight_decay,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        save_total_limit=args.save_total_limit,
-        report_to=args.report_to if args.report_to != "none" else None, # Handle "none" case
-        deepspeed=args.ds_config,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        dataloader_num_workers=args.dataloader_num_workers,
-        dataloader_prefetch_factor=args.dataloader_prefetch_factor,
-        dataloader_pin_memory=args.dataloader_pin_memory,
-        max_grad_norm=args.max_grad_norm,
-        tf32=args.tf32,
-        gradient_checkpointing=args.gradient_checkpointing,
+    training_args_dict = {
+        "output_dir": args.output_dir,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_total_limit": args.save_total_limit,
+        "report_to": args.report_to if args.report_to != "none" else None,  # Handle "none" case
+        "deepspeed": args.ds_config,
+        "fp16": args.fp16,
+        "bf16": args.bf16,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "dataloader_num_workers": args.dataloader_num_workers,
+        "dataloader_prefetch_factor": args.dataloader_prefetch_factor,
+        "dataloader_pin_memory": args.dataloader_pin_memory,
+        "max_grad_norm": args.max_grad_norm,
+        "tf32": args.tf32,
+        "gradient_checkpointing": args.gradient_checkpointing,
         # Optimizer settings for better performance
-        optim="adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
-        adam_beta1=0.9,
-        adam_beta2=0.95,
-        adam_epsilon=1e-8,
-        # Other arguments like adam_beta1, adam_beta2, lr_scheduler_type can be added if needed
-        # For streaming, max_steps might be more appropriate than num_train_epochs depending on dataset size.
-        # If the dataset is truly infinite or very large, set max_steps.
-        # For this example, num_train_epochs will cause iteration over the 'iterable' train_dataset.
-    )
+        "optim": "adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
+        "adam_beta1": 0.9,
+        "adam_beta2": 0.95,
+        "adam_epsilon": 1e-8,
+    }
+    
+    # Handle warmup_steps vs warmup_ratio
+    if args.warmup_steps is not None:
+        training_args_dict["warmup_steps"] = args.warmup_steps
+    else:
+        training_args_dict["warmup_ratio"] = args.warmup_ratio
+    
+    training_args = TrainingArguments(**training_args_dict)
 
     # Trainer
     logger.info("Initializing Trainer...")
