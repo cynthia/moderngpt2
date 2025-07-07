@@ -42,7 +42,6 @@ from transformers.pytorch_utils import Conv1D, find_pruneable_heads_and_indices,
 from transformers.utils import (
     ModelOutput,
     add_start_docstrings,
-    auto_docstring,
     logging,
 )
 from transformers.utils.deprecation import deprecate_kwarg
@@ -350,7 +349,6 @@ class ModernGPT2SequenceSummary(nn.Module):
         output = self.last_dropout(output)
         return output
 
-@auto_docstring
 class ModernGPT2PreTrainedModel(PreTrainedModel):
     config_class = ModernGPT2Config
     load_tf_weights = load_tf_weights_in_moderngpt2
@@ -478,7 +476,6 @@ DEPARALLELIZE_DOCSTRING = r"""
     ```
 """
 
-@auto_docstring
 class ModernGPT2Model(ModernGPT2PreTrainedModel):
     _supports_param_buffer_assignment = False
 
@@ -564,7 +561,6 @@ class ModernGPT2Model(ModernGPT2PreTrainedModel):
         #         logger.warning(f"Layer {layer} does not have an attention module to prune.")
 
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -819,12 +815,6 @@ class ModernGPT2Model(ModernGPT2PreTrainedModel):
         pass # Placeholder, will rely on _update_causal_mask or direct creation in forward.
 
 
-@auto_docstring(
-    custom_intro="""
-    The ModernGPT2 Model transformer with a language modeling head on top (linear layer with weights tied to the input
-    embeddings).
-    """
-)
 class ModernGPT2LMHeadModel(ModernGPT2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -876,7 +866,6 @@ class ModernGPT2LMHeadModel(ModernGPT2PreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -939,14 +928,6 @@ class ModernGPT2LMHeadModel(ModernGPT2PreTrainedModel, GenerationMixin):
 # These will also need their self.transformer calls updated similarly to ModernGPT2LMHeadModel's forward.
 # For brevity, I'm showing the LMHeadModel changes. Assume similar argument passing for other head models.
 
-@auto_docstring(
-    custom_intro="""
-        The GPT2 Model transformer with a language modeling and a multiple-choice classification head on top e.g. for
-    RocStories/SWAG tasks. The two heads are two linear layers. The language modeling head has its weights tied to the
-    input embeddings, the classification head takes as input the input of a specified classification token index in the
-    input sequence).
-    """
-)
 class ModernGPT2DoubleHeadsModel(ModernGPT2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -1003,7 +984,6 @@ class ModernGPT2DoubleHeadsModel(ModernGPT2PreTrainedModel, GenerationMixin):
         self.lm_head = new_embeddings
 
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1127,12 +1107,6 @@ class ModernGPT2DoubleHeadsModel(ModernGPT2PreTrainedModel, GenerationMixin):
                 for layer_past in past_key_values
             )
 
-@auto_docstring(
-    custom_intro="""
-    The ModernGPT2 Model transformer with a sequence classification head on top (linear layer).
-    ... (rest of docstring)
-    """
-)
 class ModernGPT2ForSequenceClassification(ModernGPT2PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -1143,7 +1117,6 @@ class ModernGPT2ForSequenceClassification(ModernGPT2PreTrainedModel):
         self.device_map = None
         self.post_init()
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1218,7 +1191,6 @@ class ModernGPT2ForSequenceClassification(ModernGPT2PreTrainedModel):
             return ((loss,) + output) if loss is not None else output
         return SequenceClassifierOutputWithPast(loss=loss, logits=pooled_logits, past_key_values=transformer_outputs.past_key_values, hidden_states=transformer_outputs.hidden_states, attentions=transformer_outputs.attentions)
 
-@auto_docstring
 class ModernGPT2ForTokenClassification(ModernGPT2PreTrainedModel):
     def __init__(self, config):
         # ... (init as before, ensure self.transformer = ModernGPT2Model(config))
@@ -1238,7 +1210,6 @@ class ModernGPT2ForTokenClassification(ModernGPT2PreTrainedModel):
         self.post_init()
 
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1280,7 +1251,6 @@ class ModernGPT2ForTokenClassification(ModernGPT2PreTrainedModel):
             return ((loss,) + output) if loss is not None else output
         return TokenClassifierOutput(loss=loss, logits=logits, hidden_states=transformer_outputs.hidden_states, attentions=transformer_outputs.attentions)
 
-@auto_docstring
 class ModernGPT2ForQuestionAnswering(ModernGPT2PreTrainedModel):
     def __init__(self, config):
         # ... (init as before, ensure self.transformer = ModernGPT2Model(config))
@@ -1292,7 +1262,6 @@ class ModernGPT2ForQuestionAnswering(ModernGPT2PreTrainedModel):
         self.device_map = None
         self.post_init()
 
-    @auto_docstring
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

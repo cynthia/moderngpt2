@@ -1,32 +1,21 @@
 import argparse
 import os
-import tempfile
-from datasets import load_dataset, interleave_datasets
+import shutil
+import json
 import sentencepiece as spm
-from transformers import PreTrainedTokenizerFast
 from transformers.utils import logging
-from tokenizers import Tokenizer
 
 logger = logging.get_logger(__name__)
 
-def dataset_text_iterator(dataset, batch_size=1000):
-    """
-    An iterator that yields batches of text from a Hugging Face dataset.
-    Specifically designed for datasets where each item has a 'text' field.
-    """
-    batch = []
-    for example in dataset:
-        text = example.get("text")
-        if text and isinstance(text, str): # Ensure text exists and is a string
-            batch.append(text)
-            if len(batch) == batch_size:
-                yield batch
-                batch = []
-    if batch: # Yield any remaining texts
-        yield batch
 
 def main():
-    parser = argparse.ArgumentParser(description="Train a SentencePiece Unigram Tokenizer on C4 dataset.")
+    parser = argparse.ArgumentParser(description="Train a SentencePiece BPE Tokenizer from text file.")
+    parser.add_argument(
+        "--input_file",
+        type=str,
+        required=True,
+        help="Path to the input text file for training the tokenizer.",
+    )
     parser.add_argument(
         "--output_path",
         type=str,
@@ -35,18 +24,6 @@ def main():
     )
     parser.add_argument(
         "--vocab_size", type=int, default=32000, help="Vocabulary size for the tokenizer."
-    )
-    parser.add_argument(
-        "--max_train_lines",
-        type=int,
-        default=1000000, # 1 million lines from C4 as a default for training
-        help="Maximum number of lines from C4 to use for training the tokenizer. Streams data.",
-    )
-    parser.add_argument(
-        "--text_iterator_batch_size",
-        type=int,
-        default=1000,
-        help="Batch size for yielding text to the tokenizer trainer.",
     )
     parser.add_argument(
         "--special_tokens",
@@ -67,8 +44,8 @@ def main():
     parser.add_argument(
         "--character_coverage",
         type=float,
-        default=0.9995,
-        help="Character coverage for SentencePiece. Default is 0.9995 (99.95%)",
+        default=0.98,
+        help="Character coverage for SentencePiece. Default is 0.98 (98%)",
     )
     parser.add_argument(
         "--max_sentence_length",
@@ -76,63 +53,24 @@ def main():
         default=16384,
         help="Maximum sentence length for SentencePiece training",
     )
+    parser.add_argument(
+        "--num_threads",
+        type=int,
+        default=8,
+        help="Number of threads to use for training",
+    )
 
     args = parser.parse_args()
 
     # Setup logging
     logging.set_verbosity_info()
 
-    logger.info("Loading and preparing C4 dataset for tokenizer training...")
-    langs = ["en", "ja", "ko", "zh"]
+    # Check if input file exists
+    if not os.path.exists(args.input_file):
+        logger.error(f"Input file {args.input_file} does not exist.")
+        return
 
-    datasets_list_processed = []
-    for lang in langs:
-        logger.info(f"Loading C4/{lang} for tokenizer training...")
-        dset = load_dataset("allenai/c4", lang, streaming=True, split="train", trust_remote_code=True)
-
-        columns_to_remove = []
-        try:
-            # Attempt to get column names from features if available
-            current_columns = list(dset.features.keys())
-            columns_to_remove = [col for col in current_columns if col != 'text']
-        except Exception as e:
-            logger.warning(f"Could not dynamically determine columns for C4/{lang} due to: {e}. "
-                           "Falling back to a predefined list of common columns to remove.")
-            # Common columns in C4 that are not 'text'
-            columns_to_remove = ['timestamp', 'url', 'c4_language', 'metadata']
-            columns_to_remove = [col for col in columns_to_remove if col != 'text']
-
-        if columns_to_remove:
-            logger.info(f"For C4/{lang}, attempting to remove columns: {columns_to_remove} to keep only 'text' for feature alignment.")
-            dset = dset.map(lambda x: x, batched=True, remove_columns=columns_to_remove)
-
-        datasets_list_processed.append(dset)
-
-    logger.info("Interleaving datasets...")
-    interleaved_ds = interleave_datasets(datasets_list_processed)
-
-    logger.info(f"Taking approx {args.max_train_lines} lines for tokenizer training.")
-    training_data_subset = interleaved_ds.take(args.max_train_lines)
-
-    # Create a temporary file to store training data for SentencePiece
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_file:
-        tmp_filename = tmp_file.name
-        logger.info(f"Writing training data to temporary file: {tmp_filename}")
-        
-        line_count = 0
-        for batch in dataset_text_iterator(training_data_subset, batch_size=args.text_iterator_batch_size):
-            for text in batch:
-                tmp_file.write(text + '\n')
-                line_count += 1
-                if line_count >= args.max_train_lines:
-                    break
-            if line_count >= args.max_train_lines:
-                break
-        
-        logger.info(f"Wrote {line_count} lines to temporary file")
-
-    # Train SentencePiece model
-    logger.info("Starting SentencePiece tokenizer training...")
+    logger.info(f"Training tokenizer from {args.input_file}")
     
     # Create output directory if it doesn't exist
     if not os.path.exists(args.output_path):
@@ -144,10 +82,10 @@ def main():
     
     # Build SentencePiece training arguments
     spm_train_args = [
-        f"--input={tmp_filename}",
+        f"--input={args.input_file}",
         f"--model_prefix={model_prefix}",
         f"--vocab_size={args.vocab_size}",
-        "--model_type=unigram",
+        "--model_type=bpe",
         f"--character_coverage={args.character_coverage}",
         f"--max_sentence_length={args.max_sentence_length}",
         "--pad_id=0",
@@ -158,13 +96,13 @@ def main():
         "--unk_piece=<unk>",
         "--normalization_rule_name=identity",  # No normalization to preserve original text
         "--byte_fallback=true",  # Enable byte fallback for out-of-vocabulary characters
+        f"--num_threads={args.num_threads}",
+        "--train_extremely_large_corpus=true",  # Enable training on extremely large corpus
     ]
     
     # Add user-defined special tokens.
-    # These tokens are added to the vocabulary by SentencePiece directly.
-    # Filter out tokens that SPM handles via specific parameters (e.g. <unk>)
-    # or that might cause issues if passed explicitly as user_defined_symbols.
-    spm_reserved_tokens = {"<unk>"}  # Add other SPM-specific tokens like <s>, </s>, <pad> if they are managed by specific params
+    # Filter out tokens that SPM handles via specific parameters
+    spm_reserved_tokens = {"<unk>", "<pad>"}
 
     filtered_user_defined_symbols = []
     if args.special_tokens:
@@ -173,29 +111,23 @@ def main():
                 filtered_user_defined_symbols.append(token)
 
     if filtered_user_defined_symbols:
-        # SentencePiece expects a comma-separated string for user_defined_symbols.
-        # It's important that args.vocab_size is set large enough to accommodate these
-        # in addition to the tokens learned from data.
+        # SentencePiece expects a comma-separated string for user_defined_symbols
         user_defined_symbols_str = ",".join(filtered_user_defined_symbols)
         spm_train_args.append(f"--user_defined_symbols={user_defined_symbols_str}")
     
     # Train the model
+    logger.info("Starting SentencePiece tokenizer training...")
     spm.SentencePieceTrainer.train(" ".join(spm_train_args))
     logger.info("SentencePiece tokenizer training finished.")
-    
-    # Clean up temporary file
-    os.unlink(tmp_filename)
-    logger.info(f"Cleaned up temporary file: {tmp_filename}")
     
     # Load the trained SentencePiece model
     sp = spm.SentencePieceProcessor()
     sp.load(f"{model_prefix}.model")
     
-    # Create HuggingFace-compatible tokenizer using the custom ModernGPT2Tokenizer
+    # Create HuggingFace-compatible tokenizer configuration
     logger.info("Creating HuggingFace-compatible tokenizer configuration...")
     
     # Copy the SentencePiece model file to the output directory with standard name
-    import shutil
     target_model_path = os.path.join(args.output_path, "tokenizer.model")
     shutil.copy2(f"{model_prefix}.model", target_model_path)
     logger.info(f"Copied SentencePiece model to {target_model_path}")
@@ -250,13 +182,11 @@ def main():
         "eos_token": "<|endoftext|>",
         "model_max_length": 1024,
         "pad_token": "<pad>",
-        "tokenizer_class": "ModernGPT2Tokenizer",  # Just the class name
+        "tokenizer_class": "ModernGPT2Tokenizer",
         "unk_token": "<unk>"
-        # auto_map is removed.
     }
     
     # Save tokenizer config
-    import json
     with open(os.path.join(args.output_path, "tokenizer_config.json"), "w") as f:
         json.dump(tokenizer_config, f, indent=2)
     
@@ -272,33 +202,21 @@ def main():
     
     logger.info(f"Tokenizer saved to {args.output_path} (compatible with ModernGPT2Tokenizer)")
     logger.info(f"Special tokens included: {args.special_tokens}")
+    logger.info(f"Vocabulary size: {sp.get_piece_size()}")
     
-    # Also keep the original SentencePiece files
-    logger.info(f"Original SentencePiece model files: {model_prefix}.model and {model_prefix}.vocab")
-    
-    logger.info(f"Tokenizer training and saving complete. Files are in {args.output_path}")
-    logger.info(f"To use this tokenizer with train.py or dataset.py, point --tokenizer_path to '{args.output_path}'")
-
-    logger.info(f"Tokenizer training and saving complete. Files are in {args.output_path}")
-    logger.info(f"To use this tokenizer with train.py or dataset.py, point --tokenizer_path to '{args.output_path}'")
-
     # Copy the ModernGPT2Tokenizer class definition file to the output directory
-    # and rename it for clarity with auto_map.
     tokenizer_class_def_source_file = os.path.join(os.path.dirname(__file__), "moderngpt2", "tokenization_moderngpt2.py")
-    # The destination filename *must* be what's referenced in auto_map (e.g., custom_tokenizer_code.py)
-    tokenizer_class_def_dest_file = os.path.join(args.output_path, "custom_tokenizer_code.py") # Keep this name for the .py file
+    tokenizer_class_def_dest_file = os.path.join(args.output_path, "custom_tokenizer_code.py")
 
     if os.path.exists(tokenizer_class_def_source_file):
         shutil.copy2(tokenizer_class_def_source_file, tokenizer_class_def_dest_file)
-        logger.info(f"Copied '{tokenizer_class_def_source_file}' to {tokenizer_class_def_dest_file} for trust_remote_code support.")
-
-        # Remove __init__.py creation if it exists from previous attempts
-        init_py_path = os.path.join(args.output_path, "__init__.py")
-        if os.path.exists(init_py_path):
-            os.remove(init_py_path)
-            logger.info(f"Removed '{init_py_path}' if it existed.")
+        logger.info(f"Copied tokenizer class definition for trust_remote_code support.")
     else:
-        logger.warning(f"Tokenizer class definition file '{tokenizer_class_def_source_file}' not found. Cannot copy for trust_remote_code.")
+        logger.warning(f"Tokenizer class definition file '{tokenizer_class_def_source_file}' not found.")
+
+    logger.info(f"Tokenizer training complete. Files saved in {args.output_path}")
+    logger.info(f"To use this tokenizer, point --tokenizer_path to '{args.output_path}'")
+
 
 if __name__ == "__main__":
     main()
