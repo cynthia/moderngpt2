@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--eval_steps", type=int, default=500, help="Evaluate every X updates steps.")
     parser.add_argument("--save_total_limit", type=int, default=10, help="Limit the total number of checkpoints.")
     parser.add_argument("--report_to", type=str, default="none", help="Report metrics to (e.g., 'wandb', 'tensorboard', 'none'). Default: 'none'.")
+    parser.add_argument("--wandb_project", type=str, default="moderngpt2", help="W&B project name. Default: 'moderngpt2'.")
     parser.add_argument("--ds_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
     parser.add_argument(
         "--streaming_eval_samples", type=int, default=1000, help="Number of samples for streaming evaluation."
@@ -171,6 +172,12 @@ def main():
             mode=args.torch_compile_mode
         )
 
+    # Set up W&B if enabled
+    if args.report_to == "wandb":
+        import wandb
+        wandb.init(project=args.wandb_project, reinit=True)
+        logger.info(f"W&B logging enabled with project: {args.wandb_project}")
+    
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
     training_args = TrainingArguments(
