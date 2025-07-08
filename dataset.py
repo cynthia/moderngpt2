@@ -10,7 +10,7 @@ from dataset_cache import DatasetCache, load_and_concatenate_datasets_with_cache
 
 logger = logging.get_logger(__name__)
 
-def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000, metadata_file: str = None, cache_dir: str = ".dataset_cache", use_cache: bool = True):
+def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pre_tokenized_path: str = None, streaming_eval_samples: int = 1000, metadata_file: str = None, cache_dir: str = ".dataset_cache", use_cache: bool = True, is_main_process: bool = True, accelerator=None):
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -50,7 +50,9 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                 eval_size=None,
                 cache_dir=cache_dir,
                 streaming=False,
-                add_labels=True  # Handle labels in the caching function
+                add_labels=True,  # Handle labels in the caching function
+                is_main_process=is_main_process,
+                accelerator=accelerator
             )
             logger.info(f"Total training samples: {len(train_dataset)}")
         else:
@@ -79,7 +81,9 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                 eval_size=eval_size,
                 cache_dir=cache_dir,
                 streaming=False,
-                add_labels=True  # Handle labels in the caching function
+                add_labels=True,  # Handle labels in the caching function
+                is_main_process=is_main_process,
+                accelerator=accelerator
             )
             logger.info(f"Total evaluation samples: {len(eval_dataset)}")
         else:
@@ -109,24 +113,34 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
         
         # Add labels column if not present - optimized version
         # Note: When using cache, labels should already be added by the caching function
+        # Only perform data manipulation on main process to avoid race conditions
         if 'labels' not in train_dataset.column_names:
-            logger.info("Adding 'labels' column to training dataset...")
-            train_dataset = train_dataset.map(
-                lambda x: {'labels': x['input_ids']}, 
-                batched=True,
-                num_proc=os.cpu_count(),  # Use all available CPUs
-                desc="Adding labels to train dataset",
-                keep_in_memory=True  # Keep in memory for faster processing
-            )
+            if is_main_process:
+                logger.info("Adding 'labels' column to training dataset...")
+                train_dataset = train_dataset.map(
+                    lambda x: {'labels': x['input_ids']}, 
+                    batched=True,
+                    num_proc=os.cpu_count(),  # Use all available CPUs
+                    desc="Adding labels to train dataset",
+                    keep_in_memory=False  # Write to disk to save memory
+                )
+            # Wait for main process to finish before other processes continue
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+                
         if 'labels' not in eval_dataset.column_names:
-            logger.info("Adding 'labels' column to evaluation dataset...")
-            eval_dataset = eval_dataset.map(
-                lambda x: {'labels': x['input_ids']}, 
-                batched=True,
-                num_proc=os.cpu_count(),  # Use all available CPUs
-                desc="Adding labels to eval dataset",
-                keep_in_memory=True  # Keep in memory for faster processing
-            )
+            if is_main_process:
+                logger.info("Adding 'labels' column to evaluation dataset...")
+                eval_dataset = eval_dataset.map(
+                    lambda x: {'labels': x['input_ids']}, 
+                    batched=True,
+                    num_proc=os.cpu_count(),  # Use all available CPUs
+                    desc="Adding labels to eval dataset",
+                    keep_in_memory=False  # Write to disk to save memory
+                )
+            # Wait for main process to finish before other processes continue
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
         
     elif pre_tokenized_path:
         logger.info(f"Attempting to load pre-tokenized dataset from: {pre_tokenized_path}")

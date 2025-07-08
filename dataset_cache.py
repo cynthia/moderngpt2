@@ -212,7 +212,9 @@ def load_and_concatenate_datasets_with_cache(
     eval_size: Optional[int] = None,
     cache_dir: str = ".dataset_cache",
     streaming: bool = False,
-    add_labels: bool = True
+    add_labels: bool = True,
+    is_main_process: bool = True,
+    accelerator=None
 ) -> Dataset:
     """
     Load and concatenate multiple dataset files with caching support.
@@ -252,43 +254,71 @@ def load_and_concatenate_datasets_with_cache(
     if cached_dataset is not None:
         return cached_dataset
     
-    # Load and concatenate datasets
-    logger.info(f"Loading and concatenating {len(files)} dataset files...")
-    datasets = []
-    
-    for file_path in files:
-        if not os.path.exists(file_path):
-            logger.warning(f"File not found, skipping: {file_path}")
-            continue
+    # Only load and concatenate on the main process if cache was not found
+    # This prevents multiple processes from doing the same work
+    if is_main_process:
+        # Load and concatenate datasets
+        logger.info(f"Loading and concatenating {len(files)} dataset files...")
+        datasets = []
         
-        logger.info(f"Loading file: {file_path}")
-        ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+        for file_path in files:
+            if not os.path.exists(file_path):
+                logger.warning(f"File not found, skipping: {file_path}")
+                continue
+            
+            logger.info(f"Loading file: {file_path}")
+            ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+            
+            # Apply size limit if specified
+            if eval_size is not None and len(ds) > eval_size:
+                ds = ds.select(range(eval_size))
+            
+            datasets.append(ds)
         
-        # Apply size limit if specified
-        if eval_size is not None and len(ds) > eval_size:
-            ds = ds.select(range(eval_size))
+        if not datasets:
+            raise ValueError("No valid dataset files found")
         
-        datasets.append(ds)
+        # Concatenate all datasets
+        logger.info("Concatenating datasets...")
+        concatenated_dataset = concatenate_datasets(datasets)
+        
+        # Add labels column if requested and not present
+        if add_labels and 'labels' not in concatenated_dataset.column_names:
+            logger.info("Adding 'labels' column to concatenated dataset...")
+            concatenated_dataset = concatenated_dataset.map(
+                lambda x: {'labels': x['input_ids']}, 
+                batched=True,
+                num_proc=os.cpu_count(),
+                desc="Adding labels column",
+                keep_in_memory=False  # Write to disk to save memory
+            )
+    else:
+        # Non-main processes wait for the main process
+        concatenated_dataset = None
     
-    if not datasets:
-        raise ValueError("No valid dataset files found")
+    # Wait for main process to finish before continuing
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+        
+    # If this is not the main process, we need to reload from cache
+    if not is_main_process:
+        # Give main process a moment to finish writing
+        import time
+        time.sleep(0.5)
+        
+        # Try to load from cache again
+        cached_dataset = cache.get_cached_dataset(cache_key, files, config)
+        if cached_dataset is not None:
+            return cached_dataset
+        else:
+            raise RuntimeError(f"Failed to load dataset from cache on non-main process. Cache key: {cache_key}")
     
-    # Concatenate all datasets
-    logger.info("Concatenating datasets...")
-    concatenated_dataset = concatenate_datasets(datasets)
+    # Save to cache (with labels column included) - only on main process
+    if is_main_process:
+        cache.save_dataset(cache_key, concatenated_dataset, files, config)
     
-    # Add labels column if requested and not present
-    if add_labels and 'labels' not in concatenated_dataset.column_names:
-        logger.info("Adding 'labels' column to concatenated dataset...")
-        concatenated_dataset = concatenated_dataset.map(
-            lambda x: {'labels': x['input_ids']}, 
-            batched=True,
-            num_proc=os.cpu_count(),
-            desc="Adding labels column",
-            keep_in_memory=True  # Keep in memory for faster processing
-        )
-    
-    # Save to cache (with labels column included)
-    cache.save_dataset(cache_key, concatenated_dataset, files, config)
+    # Wait for main process to finish saving before other processes continue
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
     
     return concatenated_dataset

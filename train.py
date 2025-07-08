@@ -14,6 +14,8 @@ from transformers import (
     DataCollatorForLanguageModeling,
 )
 from transformers.utils import logging # For logger if needed
+from accelerate import Accelerator
+import torch.distributed as dist
 
 logger = logging.get_logger(__name__)
 
@@ -63,7 +65,7 @@ def main():
     parser.add_argument("--save_total_limit", type=int, default=10, help="Limit the total number of checkpoints.")
     parser.add_argument("--report_to", type=str, default="none", help="Report metrics to (e.g., 'wandb', 'tensorboard', 'none'). Default: 'none'.")
     parser.add_argument("--wandb_project", type=str, default="moderngpt2", help="W&B project name. Default: 'moderngpt2'.")
-    parser.add_argument("--ds_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
+    parser.add_argument("--ds_config", "--deepspeed_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
     parser.add_argument(
         "--streaming_eval_samples", type=int, default=1000, help="Number of samples for streaming evaluation."
     )
@@ -121,12 +123,19 @@ def main():
     # --- REMOVED OLD DATASET HANDLING ---
 
     # --- ADD NEW DATASET AND TOKENIZER LOADING ---
-    # Clear cache if requested
-    if args.clear_dataset_cache:
+    # Initialize Accelerator to get process rank info
+    accelerator = Accelerator()
+    
+    # Clear cache if requested (only on rank 0)
+    if args.clear_dataset_cache and accelerator.is_main_process:
         from dataset_cache import DatasetCache
         cache = DatasetCache(args.dataset_cache_dir)
         cache.clear_cache()
         logger.info("Dataset cache cleared")
+    
+    # Synchronize all processes after cache clearing
+    if args.clear_dataset_cache:
+        accelerator.wait_for_everyone()
     
     if args.metadata_file:
         logger.info(
@@ -149,7 +158,9 @@ def main():
         streaming_eval_samples=args.streaming_eval_samples,
         metadata_file=args.metadata_file,
         cache_dir=args.dataset_cache_dir,
-        use_cache=args.use_dataset_cache
+        use_cache=args.use_dataset_cache,
+        is_main_process=accelerator.is_main_process,
+        accelerator=accelerator
     )
     # --- END ADDITION ---
 
