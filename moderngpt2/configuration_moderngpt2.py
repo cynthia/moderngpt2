@@ -264,7 +264,10 @@ class ModernGPT2Config(PretrainedConfig):
             self.intermediate_size = kwargs.pop("n_inner")
         elif "n_inner" in kwargs: # if intermediate_size was set, pop n_inner to avoid conflict
             kwargs.pop("n_inner")
-
+        
+        # Remove loss_type if it exists in kwargs (not used by this model)
+        if "loss_type" in kwargs:
+            kwargs.pop("loss_type")
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 

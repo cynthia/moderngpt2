@@ -211,7 +211,8 @@ def load_and_concatenate_datasets_with_cache(
     cache_key: str,
     eval_size: Optional[int] = None,
     cache_dir: str = ".dataset_cache",
-    streaming: bool = False
+    streaming: bool = False,
+    add_labels: bool = True
 ) -> Dataset:
     """
     Load and concatenate multiple dataset files with caching support.
@@ -222,6 +223,7 @@ def load_and_concatenate_datasets_with_cache(
         eval_size: If provided, limit each file to this many samples
         cache_dir: Directory for caching
         streaming: Whether to use streaming mode (disables caching)
+        add_labels: Whether to add 'labels' column (copy of 'input_ids')
     
     Returns:
         Concatenated dataset
@@ -241,7 +243,8 @@ def load_and_concatenate_datasets_with_cache(
     # Configuration for fingerprinting
     config = {
         'eval_size': eval_size,
-        'streaming': streaming
+        'streaming': streaming,
+        'add_labels': add_labels
     }
     
     # Try to load from cache
@@ -274,7 +277,18 @@ def load_and_concatenate_datasets_with_cache(
     logger.info("Concatenating datasets...")
     concatenated_dataset = concatenate_datasets(datasets)
     
-    # Save to cache
+    # Add labels column if requested and not present
+    if add_labels and 'labels' not in concatenated_dataset.column_names:
+        logger.info("Adding 'labels' column to concatenated dataset...")
+        concatenated_dataset = concatenated_dataset.map(
+            lambda x: {'labels': x['input_ids']}, 
+            batched=True,
+            num_proc=os.cpu_count(),
+            desc="Adding labels column",
+            keep_in_memory=True  # Keep in memory for faster processing
+        )
+    
+    # Save to cache (with labels column included)
     cache.save_dataset(cache_key, concatenated_dataset, files, config)
     
     return concatenated_dataset

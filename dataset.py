@@ -49,7 +49,8 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                 cache_key=f"train_{os.path.basename(metadata_file)}",
                 eval_size=None,
                 cache_dir=cache_dir,
-                streaming=False
+                streaming=False,
+                add_labels=True  # Handle labels in the caching function
             )
             logger.info(f"Total training samples: {len(train_dataset)}")
         else:
@@ -77,7 +78,8 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                 cache_key=f"eval_{os.path.basename(metadata_file)}",
                 eval_size=eval_size,
                 cache_dir=cache_dir,
-                streaming=False
+                streaming=False,
+                add_labels=True  # Handle labels in the caching function
             )
             logger.info(f"Total evaluation samples: {len(eval_dataset)}")
         else:
@@ -105,11 +107,26 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
         if 'input_ids' not in train_dataset.column_names or 'attention_mask' not in train_dataset.column_names:
             raise ValueError(f"Training dataset must have 'input_ids' and 'attention_mask' columns. Found: {train_dataset.column_names}")
         
-        # Add labels column if not present
+        # Add labels column if not present - optimized version
+        # Note: When using cache, labels should already be added by the caching function
         if 'labels' not in train_dataset.column_names:
-            train_dataset = train_dataset.map(lambda x: {'labels': x['input_ids']}, batched=True)
+            logger.info("Adding 'labels' column to training dataset...")
+            train_dataset = train_dataset.map(
+                lambda x: {'labels': x['input_ids']}, 
+                batched=True,
+                num_proc=os.cpu_count(),  # Use all available CPUs
+                desc="Adding labels to train dataset",
+                keep_in_memory=True  # Keep in memory for faster processing
+            )
         if 'labels' not in eval_dataset.column_names:
-            eval_dataset = eval_dataset.map(lambda x: {'labels': x['input_ids']}, batched=True)
+            logger.info("Adding 'labels' column to evaluation dataset...")
+            eval_dataset = eval_dataset.map(
+                lambda x: {'labels': x['input_ids']}, 
+                batched=True,
+                num_proc=os.cpu_count(),  # Use all available CPUs
+                desc="Adding labels to eval dataset",
+                keep_in_memory=True  # Keep in memory for faster processing
+            )
         
     elif pre_tokenized_path:
         logger.info(f"Attempting to load pre-tokenized dataset from: {pre_tokenized_path}")
