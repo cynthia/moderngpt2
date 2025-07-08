@@ -196,11 +196,10 @@ def main():
             mode=args.torch_compile_mode
         )
 
-    # Set up W&B if enabled
+    # W&B project name will be passed to TrainingArguments
+    # The Trainer will handle wandb initialization on rank 0 only
     if args.report_to == "wandb":
-        import wandb
-        wandb.init(project=args.wandb_project, reinit=True)
-        logger.info(f"W&B logging enabled with project: {args.wandb_project}")
+        logger.info(f"W&B logging will be enabled with project: {args.wandb_project}")
     
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
@@ -231,7 +230,19 @@ def main():
         "adam_beta1": 0.9,
         "adam_beta2": 0.95,
         "adam_epsilon": 1e-8,
+        # Distributed training settings
+        "ddp_find_unused_parameters": False,  # Better performance when all parameters are used
+        "ddp_bucket_cap_mb": 25,  # Bucket size for DDP gradient synchronization
     }
+    
+    # Add wandb project name if using wandb
+    if args.report_to == "wandb":
+        training_args_dict["run_name"] = f"{args.wandb_project}-{args.model_size_name}"
+        # Set wandb project via environment variable (Trainer will read this)
+        os.environ["WANDB_PROJECT"] = args.wandb_project
+        # Disable wandb on non-main processes
+        if not accelerator.is_main_process:
+            os.environ["WANDB_DISABLED"] = "true"
     
     # Handle warmup_steps vs warmup_ratio
     if args.warmup_steps is not None:
