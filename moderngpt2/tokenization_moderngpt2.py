@@ -88,6 +88,13 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
 
     vocab_files_names = VOCAB_FILES_NAMES
     model_input_names = ["input_ids", "attention_mask"]
+    
+    # BitBPE: Define prefix tokens for bit redistribution
+    _bitbpe_prefix_tokens = None  # Will be initialized if BitBPE is enabled
+    _bitbpe_9bit_tokens = None  # Mapping from 9-bit values to token IDs
+    _bitbpe_enabled = False
+    _bitbpe_9bit_start_id = None  # Starting ID for 9-bit tokens
+    _actual_vocab_size = None  # Actual vocab size including BitBPE tokens
 
     def __init__(
         self,
@@ -102,6 +109,8 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
         clean_up_tokenization_spaces=False,
         use_default_system_prompt=False,
         spaces_between_special_tokens=False,
+        tokenizer_type: str = "bpe",  # BitBPE: Added tokenizer type parameter
+        bitbpe_config: Optional[Dict[str, Any]] = None,  # BitBPE: Configuration dict
         **kwargs,
     ):
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
@@ -114,8 +123,14 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
         self.add_bos_token = add_bos_token
         self.add_eos_token = add_eos_token
         self.use_default_system_prompt = use_default_system_prompt
+        self.tokenizer_type = tokenizer_type  # BitBPE: Store tokenizer type
+        self.bitbpe_config = bitbpe_config or {}  # BitBPE: Store configuration
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(vocab_file)
+        
+        # BitBPE: Initialize BitBPE if enabled
+        if self.tokenizer_type == "bitbpe":
+            self._initialize_bitbpe()
 
         super().__init__(
             bos_token=bos_token,
@@ -128,6 +143,8 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
             clean_up_tokenization_spaces=clean_up_tokenization_spaces,
             use_default_system_prompt=use_default_system_prompt,
             spaces_between_special_tokens=spaces_between_special_tokens,
+            tokenizer_type=tokenizer_type,
+            bitbpe_config=bitbpe_config,
             **kwargs,
         )
 
@@ -144,22 +161,192 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
 
     @property
     def vocab_size(self):
-        """Returns vocab size"""
+        """Returns actual vocab size including BitBPE tokens."""
+        if self._bitbpe_enabled and self._actual_vocab_size is not None:
+            return self._actual_vocab_size
         return self.sp_model.get_piece_size()
 
     def get_vocab(self):
-        """Returns vocab as a dict"""
-        vocab = {self.convert_ids_to_tokens(i): i for i in range(self.vocab_size)}
+        """Returns vocab as a dict including BitBPE tokens."""
+        # Use base vocab size for regular tokens
+        base_vocab_size = self.sp_model.get_piece_size()
+        vocab = {self.convert_ids_to_tokens(i): i for i in range(base_vocab_size)}
         vocab.update(self.added_tokens_encoder)
+        
+        if self._bitbpe_enabled:
+            # Add prefix tokens
+            for prefix_6bit, token_id in self._bitbpe_prefix_tokens.items():
+                vocab[f"<PREFIX_{prefix_6bit:02X}>"] = token_id
+            
+            # Add 9-bit tokens
+            if self._bitbpe_9bit_tokens:
+                for value_9bit, token_id in self._bitbpe_9bit_tokens.items():
+                    vocab[f"<9BIT_{value_9bit:03X}>"] = token_id
+        
         return vocab
+    
+    def set_tokenizer_type(self, tokenizer_type: str):
+        """BitBPE: Set the tokenizer type and reinitialize if needed."""
+        if tokenizer_type not in ["bpe", "bitbpe"]:
+            raise ValueError(f"Unsupported tokenizer type: {tokenizer_type}")
+        self.tokenizer_type = tokenizer_type
+        if tokenizer_type == "bitbpe":
+            self._initialize_bitbpe()
+        else:
+            self._bitbpe_enabled = False
+            self._bitbpe_prefix_tokens = None
+            self._bitbpe_9bit_tokens = None
+            self._actual_vocab_size = None
+    
+    def _initialize_bitbpe(self):
+        """BitBPE: Initialize BitBPE prefix tokens and 9-bit tokens for UTF-8 bit redistribution."""
+        self._bitbpe_enabled = True
+        
+        # BitBPE: Get configuration from bitbpe_config if available
+        base_vocab_size = self.sp_model.get_piece_size()
+        if self.bitbpe_config:
+            num_prefix_tokens = self.bitbpe_config.get('num_prefix_tokens', 16)
+            prefix_token_start_id = self.bitbpe_config.get('prefix_token_start_id', base_vocab_size + 2)
+        else:
+            num_prefix_tokens = 16
+            prefix_token_start_id = base_vocab_size + 2
+        
+        # BitBPE: Reserve tokens for 6-bit prefixes
+        # These represent the first 6 bits of UTF-8 encoded bytes
+        self._bitbpe_prefix_tokens = {}
+        
+        # BitBPE: Create mapping for 3-byte UTF-8 prefixes
+        # For 3-byte sequences starting with 0xE0-0xEF (11100000-11101111)
+        # The top 6 bits of these bytes range from 111000 to 111011
+        for i in range(num_prefix_tokens):  # 16 prefixes for 0xE0 to 0xEF
+            # Calculate the actual byte value (0xE0 + i)
+            byte_val = 0xE0 + i
+            # Extract top 6 bits
+            prefix_6bit = byte_val >> 2
+            # Map to special tokens starting from prefix_token_start_id
+            prefix_token_id = prefix_token_start_id + i
+            self._bitbpe_prefix_tokens[prefix_6bit] = prefix_token_id
+        
+        # Initialize 9-bit tokens (512 tokens for values 0-511)
+        self._bitbpe_9bit_start_id = prefix_token_start_id + num_prefix_tokens
+        self._bitbpe_9bit_tokens = {}
+        self._bitbpe_9bit_reverse = {}  # For decoding
+        
+        for i in range(512):  # 9-bit values: 0-511
+            token_id = self._bitbpe_9bit_start_id + i
+            self._bitbpe_9bit_tokens[i] = token_id
+            self._bitbpe_9bit_reverse[token_id] = i
+        
+        # Calculate actual vocabulary size - need to account for the highest token ID
+        # The vocab size should be the highest token ID + 1
+        max_token_id = self._bitbpe_9bit_start_id + 511  # Last 9-bit token
+        self._actual_vocab_size = max_token_id + 1
+        
+        logger.info(f"BitBPE initialized:")
+        logger.info(f"  - Base vocab size: {base_vocab_size}")
+        logger.info(f"  - Prefix tokens: {num_prefix_tokens} (IDs {prefix_token_start_id}-{prefix_token_start_id + num_prefix_tokens - 1})")
+        logger.info(f"  - 9-bit tokens: 512 (IDs {self._bitbpe_9bit_start_id}-{self._bitbpe_9bit_start_id + 511})")
+        logger.info(f"  - Total vocab size: {self._actual_vocab_size}")
+    
+    def _encode_bitbpe(self, text: str) -> List[int]:
+        """BitBPE: Encode text, applying bit redistribution only to byte fallback sequences."""
+        # First, get regular BPE encoding
+        regular_tokens = self.sp_model.encode(text)
+        
+        if not self._bitbpe_enabled or not self._bitbpe_prefix_tokens:
+            return regular_tokens
+        
+        # Convert token IDs to token strings to identify byte tokens
+        result_tokens = []
+        i = 0
+        last_prefix = None  # Track last prefix for deduplication
+        
+        while i < len(regular_tokens):
+            token_id = regular_tokens[i]
+            token_str = self.sp_model.IdToPiece(token_id)
+            
+            # Check if this is a byte token (format: <0xXX>)
+            if token_str.startswith('<0x') and token_str.endswith('>'):
+                # This is a byte token - check if it's part of a 3-byte UTF-8 sequence
+                # Extract the byte value
+                byte_val = int(token_str[3:-1], 16)
+                
+                # Check if this starts a 3-byte UTF-8 sequence (0xE0-0xEF)
+                if 0xE0 <= byte_val <= 0xEF and i + 2 < len(regular_tokens):
+                    # Check if next two tokens are also byte tokens
+                    token2_str = self.sp_model.IdToPiece(regular_tokens[i + 1])
+                    token3_str = self.sp_model.IdToPiece(regular_tokens[i + 2])
+                    
+                    if (token2_str.startswith('<0x') and token2_str.endswith('>') and
+                        token3_str.startswith('<0x') and token3_str.endswith('>')):
+                        # We have a 3-byte sequence - apply BitBPE
+                        b1 = byte_val
+                        b2 = int(token2_str[3:-1], 16)
+                        b3 = int(token3_str[3:-1], 16)
+                        
+                        # Extract 6-bit prefix from first byte
+                        prefix_6bit = b1 >> 2  # Top 6 bits
+                        
+                        # Check if we need to add the prefix token (deduplication)
+                        if prefix_6bit != last_prefix:
+                            # Prefix changed, add the prefix token
+                            if prefix_6bit in self._bitbpe_prefix_tokens:
+                                result_tokens.append(self._bitbpe_prefix_tokens[prefix_6bit])
+                                last_prefix = prefix_6bit
+                        
+                        # Redistribute remaining bits into two 9-bit tokens
+                        # b1's lower 2 bits + b2's upper 7 bits = 9 bits
+                        b2_hat = ((b1 & 0x03) << 7) | ((b2 & 0xFE) >> 1)
+                        # b2's lower 1 bit + b3's 8 bits = 9 bits
+                        b3_hat = ((b2 & 0x01) << 8) | b3
+                        
+                        # Map 9-bit values to token IDs
+                        if b2_hat in self._bitbpe_9bit_tokens and b3_hat in self._bitbpe_9bit_tokens:
+                            result_tokens.append(self._bitbpe_9bit_tokens[b2_hat])
+                            result_tokens.append(self._bitbpe_9bit_tokens[b3_hat])
+                        else:
+                            # Fallback if 9-bit mapping fails (shouldn't happen)
+                            result_tokens.extend([regular_tokens[i], regular_tokens[i+1], regular_tokens[i+2]])
+                            logger.warning(f"BitBPE: Failed to map 9-bit values {b2_hat}, {b3_hat}")
+                        
+                        # Skip the next two tokens
+                        i += 3
+                        continue
+            else:
+                # Not a byte token - reset prefix tracking
+                last_prefix = None
+            
+            # Regular token - just add it
+            result_tokens.append(token_id)
+            i += 1
+        
+        return result_tokens
 
     def tokenize(self, text: "TextInput", **kwargs) -> List[str]:
         """
         Args:
             text: TextInput
-        Simply calls PreTrainedTokenizer's method
+        Returns tokenized strings with BitBPE tokens if enabled.
         """
-        return super().tokenize(text, **kwargs)
+        if self.tokenizer_type == "bitbpe" and self._bitbpe_enabled:
+            # First encode with BitBPE to get token IDs
+            token_ids = self.encode(text, add_special_tokens=False)
+            
+            # Convert token IDs back to strings
+            result = []
+            for tid in token_ids:
+                if tid < self.sp_model.get_piece_size():
+                    # Regular vocab token
+                    token_str = self.sp_model.IdToPiece(tid)
+                else:
+                    # BitBPE special token
+                    token_str = self._convert_id_to_token(tid)
+                result.append(token_str)
+            
+            return result
+        else:
+            # Fall back to parent implementation for non-BitBPE
+            return super().tokenize(text, **kwargs)
 
     def _tokenize(self, text, **kwargs):
         """
@@ -167,7 +354,49 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
             text: TextInput
         Returns a tokenized string. The ModernGPT2 tokenizer never adds a prefix space.
         """
+        # Always use regular tokenization for _tokenize
+        # BitBPE is handled in the encode() method
         return self.sp_model.encode(text, out_type=str)
+    
+    def _should_apply_bitbpe(self, token: str) -> bool:
+        """BitBPE: Check if a token should have BitBPE applied."""
+        # Check if token contains CJK characters that would benefit from BitBPE
+        try:
+            for char in token:
+                if '\u4e00' <= char <= '\u9fff' or '\u3040' <= char <= '\u309f' or '\uac00' <= char <= '\ud7af':
+                    return True
+        except:
+            pass
+        return False
+
+    def _convert_token_to_id_with_bitbpe(self, token):
+        """Converts a token string to an id, including BitBPE tokens."""
+        # First try regular vocab
+        result = self.sp_model.piece_to_id(token)
+        if result != self.unk_token_id:
+            return result
+        
+        # Check if it's a BitBPE token
+        if self._bitbpe_enabled:
+            # Check prefix tokens
+            if token.startswith("<PREFIX_") and token.endswith(">"):
+                try:
+                    prefix_val = int(token[8:-1], 16)
+                    if prefix_val in self._bitbpe_prefix_tokens:
+                        return self._bitbpe_prefix_tokens[prefix_val]
+                except ValueError:
+                    pass
+            
+            # Check 9-bit tokens
+            if token.startswith("<9BIT_") and token.endswith(">"):
+                try:
+                    bit9_val = int(token[6:-1], 16)
+                    if bit9_val in self._bitbpe_9bit_tokens:
+                        return self._bitbpe_9bit_tokens[bit9_val]
+                except ValueError:
+                    pass
+        
+        return self.unk_token_id
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
@@ -175,9 +404,164 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
 
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
-        token = self.sp_model.IdToPiece(index)
-        return token
+        # Check if it's in regular vocab
+        if index < self.sp_model.get_piece_size():
+            return self.sp_model.IdToPiece(index)
+        
+        # Check if it's a BitBPE token
+        if self._bitbpe_enabled:
+            # Check prefix tokens
+            if self._bitbpe_prefix_tokens:
+                for prefix_6bit, token_id in self._bitbpe_prefix_tokens.items():
+                    if token_id == index:
+                        return f"<PREFIX_{prefix_6bit:02X}>"
+            
+            # Check 9-bit tokens
+            if self._bitbpe_9bit_reverse and index in self._bitbpe_9bit_reverse:
+                value_9bit = self._bitbpe_9bit_reverse[index]
+                return f"<9BIT_{value_9bit:03X}>"
+        
+        return self.unk_token
 
+    def encode(
+        self,
+        text: str,
+        text_pair: Optional[str] = None,
+        add_special_tokens: bool = True,
+        padding: bool = False,
+        truncation: bool = False,
+        max_length: Optional[int] = None,
+        return_tensors: Optional[str] = None,
+        **kwargs
+    ) -> List[int]:
+        """
+        Encode text(s) to token IDs. Overrides parent to support BitBPE encoding.
+        """
+        # BitBPE: Use BitBPE encoding if enabled
+        if self.tokenizer_type == "bitbpe" and self._bitbpe_enabled:
+            # Handle text pair if provided
+            if text_pair is not None:
+                # Encode both texts with BitBPE
+                tokens = self._encode_bitbpe(text)
+                tokens_pair = self._encode_bitbpe(text_pair)
+                
+                # Build inputs with special tokens if needed
+                if add_special_tokens:
+                    tokens = self.build_inputs_with_special_tokens(tokens, tokens_pair)
+                else:
+                    tokens = tokens + tokens_pair
+            else:
+                # Single text encoding
+                tokens = self._encode_bitbpe(text)
+                
+                # Add special tokens if needed
+                if add_special_tokens:
+                    tokens = self.build_inputs_with_special_tokens(tokens)
+            
+            # Handle padding, truncation etc. if needed
+            # For now, return the tokens directly
+            return tokens
+        
+        # Fall back to parent's encode method for regular BPE
+        return super().encode(
+            text,
+            text_pair=text_pair,
+            add_special_tokens=add_special_tokens,
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            return_tensors=return_tensors,
+            **kwargs
+        )
+    
+    def _encode_plus(
+        self,
+        text: str,
+        text_pair: Optional[str] = None,
+        add_special_tokens: bool = True,
+        padding: bool = False,
+        truncation: bool = False,
+        max_length: Optional[int] = None,
+        stride: int = 0,
+        is_split_into_words: bool = False,
+        pad_to_multiple_of: Optional[int] = None,
+        return_tensors: Optional[str] = None,
+        return_token_type_ids: Optional[bool] = None,
+        return_attention_mask: Optional[bool] = None,
+        return_overflowing_tokens: bool = False,
+        return_special_tokens_mask: bool = False,
+        return_offsets_mapping: bool = False,
+        return_length: bool = False,
+        verbose: bool = True,
+        **kwargs
+    ) -> dict:
+        """
+        Override _encode_plus to use BitBPE encoding when enabled.
+        """
+        if self.tokenizer_type == "bitbpe" and self._bitbpe_enabled:
+            # Use our custom encode method which handles BitBPE
+            input_ids = self.encode(
+                text,
+                text_pair=text_pair,
+                add_special_tokens=add_special_tokens,
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+                return_tensors=None,
+                **kwargs
+            )
+            
+            # Build the output dictionary
+            encoded_inputs = {"input_ids": input_ids}
+            
+            # Add attention mask if requested (default to all 1s)
+            if return_attention_mask is not False:
+                encoded_inputs["attention_mask"] = [1] * len(input_ids)
+            
+            # Handle padding if needed
+            if padding and max_length:
+                padding_length = max_length - len(input_ids)
+                if padding_length > 0:
+                    encoded_inputs["input_ids"] = encoded_inputs["input_ids"] + [self.pad_token_id] * padding_length
+                    if "attention_mask" in encoded_inputs:
+                        encoded_inputs["attention_mask"] = encoded_inputs["attention_mask"] + [0] * padding_length
+            
+            # Handle truncation if needed
+            if truncation and max_length and len(encoded_inputs["input_ids"]) > max_length:
+                encoded_inputs["input_ids"] = encoded_inputs["input_ids"][:max_length]
+                if "attention_mask" in encoded_inputs:
+                    encoded_inputs["attention_mask"] = encoded_inputs["attention_mask"][:max_length]
+            
+            # Convert to tensors if requested
+            if return_tensors is not None:
+                # This would normally use the convert_to_tensors method
+                # For now, we'll let the parent class handle tensor conversion
+                pass
+            
+            return encoded_inputs
+        
+        # Fall back to parent's _encode_plus for regular BPE
+        return super()._encode_plus(
+            text,
+            text_pair=text_pair,
+            add_special_tokens=add_special_tokens,
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            stride=stride,
+            is_split_into_words=is_split_into_words,
+            pad_to_multiple_of=pad_to_multiple_of,
+            return_tensors=return_tensors,
+            return_token_type_ids=return_token_type_ids,
+            return_attention_mask=return_attention_mask,
+            return_overflowing_tokens=return_overflowing_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
+            return_offsets_mapping=return_offsets_mapping,
+            return_length=return_length,
+            verbose=verbose,
+            **kwargs
+        )
+    
     def convert_tokens_to_string(self, tokens):
         """Converts a sequence of tokens (string) in a single string."""
         current_sub_tokens = []
@@ -307,9 +691,101 @@ class ModernGPT2Tokenizer(PreTrainedTokenizer):
         spaces_between_special_tokens: bool = False,
         **kwargs,
     ) -> str:
+        # BitBPE: Handle BitBPE decoding if enabled
+        if self.tokenizer_type == "bitbpe" and self._bitbpe_enabled:
+            return self._decode_bitbpe(token_ids, skip_special_tokens, spaces_between_special_tokens)
+        
         sub_texts = []
         current_sub_text = []
         for ids in token_ids:
+            if skip_special_tokens and ids in self.all_special_ids:
+                continue
+            if ids in self._added_tokens_decoder:
+                if current_sub_text:
+                    sub_texts.append(self.sp_model.decode(current_sub_text))
+                sub_texts.append(self._added_tokens_decoder[ids].content)
+                current_sub_text = []
+            else:
+                current_sub_text.append(ids)
+        if current_sub_text:
+            sub_texts.append(self.sp_model.decode(current_sub_text))
+
+        if spaces_between_special_tokens:
+            sub_texts = " ".join(sub_texts)
+        else:
+            sub_texts = "".join(sub_texts)
+
+        return sub_texts.replace(SPIECE_UNDERLINE, " ")
+    
+    def _decode_bitbpe(self, token_ids: List[int], skip_special_tokens: bool, spaces_between_special_tokens: bool) -> str:
+        """BitBPE: Decode token IDs that may contain BitBPE encoded sequences."""
+        if not self._bitbpe_enabled or not self._bitbpe_9bit_reverse:
+            # Fallback to regular decoding
+            return self._decode(
+                token_ids,
+                skip_special_tokens=skip_special_tokens,
+                spaces_between_special_tokens=spaces_between_special_tokens,
+            )
+        
+        # Process tokens to handle BitBPE sequences
+        processed_tokens = []
+        i = 0
+        current_prefix = None
+        
+        while i < len(token_ids):
+            token_id = token_ids[i]
+            
+            # Skip special tokens if requested
+            if skip_special_tokens and token_id in self.all_special_ids:
+                i += 1
+                continue
+            
+            # Check if this is a BitBPE prefix token
+            is_prefix = False
+            if self._bitbpe_prefix_tokens:
+                for prefix_6bit, prefix_id in self._bitbpe_prefix_tokens.items():
+                    if prefix_id == token_id:
+                        current_prefix = prefix_6bit
+                        is_prefix = True
+                        i += 1
+                        break
+            
+            if is_prefix:
+                continue
+            
+            # Check if this is a 9-bit token
+            if token_id in self._bitbpe_9bit_reverse and i + 1 < len(token_ids):
+                next_token_id = token_ids[i + 1]
+                if next_token_id in self._bitbpe_9bit_reverse and current_prefix is not None:
+                    # We have a complete BitBPE sequence
+                    b2_hat = self._bitbpe_9bit_reverse[token_id]
+                    b3_hat = self._bitbpe_9bit_reverse[next_token_id]
+                    
+                    # Reconstruct the original 3 bytes
+                    b1 = (current_prefix << 2) | ((b2_hat >> 7) & 0x03)
+                    b2 = ((b2_hat & 0x7F) << 1) | ((b3_hat >> 8) & 0x01)
+                    b3 = b3_hat & 0xFF
+                    
+                    # Convert bytes back to token IDs
+                    for byte_val in [b1, b2, b3]:
+                        byte_token = f"<0x{byte_val:02X}>"
+                        byte_token_id = self.sp_model.PieceToId(byte_token)
+                        if byte_token_id != self.unk_token_id:
+                            processed_tokens.append(byte_token_id)
+                    
+                    i += 2
+                    continue
+            
+            # Not part of a BitBPE sequence - add token as is if it's in regular vocab
+            if token_id < self.sp_model.get_piece_size():
+                processed_tokens.append(token_id)
+            i += 1
+        
+        # Now decode the processed tokens using the parent class method
+        # to avoid recursion
+        sub_texts = []
+        current_sub_text = []
+        for ids in processed_tokens:
             if skip_special_tokens and ids in self.all_special_ids:
                 continue
             if ids in self._added_tokens_decoder:

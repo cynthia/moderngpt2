@@ -95,6 +95,16 @@ class ModernGPT2RotaryEmbedding(nn.Module):
         self.register_buffer("sin_cached", emb.sin().to(dtype=dtype, device=device), persistent=False)
 
     def forward(self, x, position_ids):
+        # Dynamically extend position embeddings if needed
+        max_pos = position_ids.max()
+        if max_pos >= self.max_seq_len_cached:
+            # Extend the cached embeddings to accommodate longer sequences
+            self._set_cos_sin_cache(seq_len=max_pos + 1, device=position_ids.device, dtype=self.cache_dtype)
+            logger.warning(
+                f"Extended position embeddings from {self.max_position_embeddings} to {max_pos + 1}. "
+                f"Consider setting n_positions={max_pos + 1} in your config to avoid dynamic extension."
+            )
+        
         cos = self.cos_cached[position_ids]
         sin = self.sin_cached[position_ids]
         return cos, sin
@@ -617,6 +627,17 @@ class ModernGPT2Model(ModernGPT2PreTrainedModel):
 
         if position_ids is None:
              position_ids = cache_position.unsqueeze(0)
+
+        # Debug logging for position_ids
+        if position_ids.max() >= self.rotary_emb.max_position_embeddings:
+            logger.warning(
+                f"Position ids exceed max_position_embeddings! "
+                f"position_ids shape: {position_ids.shape}, "
+                f"range: [{position_ids.min().item()}, {position_ids.max().item()}], "
+                f"max_position_embeddings: {self.rotary_emb.max_position_embeddings}, "
+                f"cache_position shape: {cache_position.shape}, "
+                f"past_seen_tokens: {past_seen_tokens if 'past_seen_tokens' in locals() else 'N/A'}"
+            )
 
         cos, sin = self.rotary_emb(inputs_embeds, position_ids)
         position_embeddings = (cos,sin)

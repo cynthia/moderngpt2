@@ -70,6 +70,7 @@ def main():
         "--streaming_eval_samples", type=int, default=1000, help="Number of samples for streaming evaluation."
     )
     parser.add_argument("--block_size", type=int, default=1024, help="Block size for tokenization and chunking (used if not loading pre-tokenized data).")
+    parser.add_argument("--n_positions", type=int, default=None, help="Maximum position embeddings. If not set, uses block_size.")
     parser.add_argument(
         "--pre_tokenized_dataset_path",
         type=str,
@@ -99,6 +100,7 @@ def main():
     parser.add_argument("--dataset_cache_dir", type=str, default=".dataset_cache", help="Directory to cache concatenated datasets.")
     parser.add_argument("--use_dataset_cache", action="store_true", help="Enable dataset caching for faster subsequent runs.")
     parser.add_argument("--clear_dataset_cache", action="store_true", help="Clear the dataset cache before training.")
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine", help="LR scheduler type (linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup)")
 
     args = parser.parse_args()
 
@@ -169,10 +171,16 @@ def main():
 
     # Configuration and Model (uses the new tokenizer for pad_token_id and vocab_size)
     logger.info(f"Initializing model with size: {args.model_size_name}")
+    
+    # Set n_positions based on args or default to block_size
+    n_positions = args.n_positions if args.n_positions is not None else args.block_size
+    
     config = ModernGPT2Config(
         model_size_name=args.model_size_name,
         pad_token_id=tokenizer.pad_token_id, # Use tokenizer from get_dataset
+        n_positions=n_positions,
     )
+    logger.info(f"Model configured with n_positions={config.n_positions}")
     if config.vocab_size != tokenizer.vocab_size:
         logger.warning(
             f"Config vocab_size ({config.vocab_size}) does not match tokenizer vocab_size ({tokenizer.vocab_size}). "
@@ -230,6 +238,8 @@ def main():
         "adam_beta1": 0.9,
         "adam_beta2": 0.95,
         "adam_epsilon": 1e-8,
+        # LR scheduler
+        "lr_scheduler_type": args.lr_scheduler_type,
         # Distributed training settings
         "ddp_find_unused_parameters": False,  # Better performance when all parameters are used
         "ddp_bucket_cap_mb": 25,  # Bucket size for DDP gradient synchronization
@@ -257,7 +267,7 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,

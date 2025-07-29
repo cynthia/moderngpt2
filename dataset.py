@@ -14,6 +14,19 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    except ValueError as e:
+        # If AutoTokenizer fails with ModernGPT2Tokenizer, try to load it directly
+        if "ModernGPT2Tokenizer" in str(e):
+            logger.info("AutoTokenizer failed for ModernGPT2Tokenizer, loading directly...")
+            try:
+                from moderngpt2.tokenization_moderngpt2 import ModernGPT2Tokenizer
+                tokenizer = ModernGPT2Tokenizer.from_pretrained(tokenizer_path)
+            except Exception as e2:
+                logger.error(f"Could not load ModernGPT2Tokenizer from {tokenizer_path}. Error: {e2}")
+                raise
+        else:
+            logger.error(f"Could not load tokenizer from {tokenizer_path}. Error: {e}")
+            raise
     except Exception as e:
         logger.error(f"Could not load tokenizer from {tokenizer_path}. Error: {e}")
         raise

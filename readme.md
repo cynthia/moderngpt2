@@ -83,6 +83,86 @@ Processes 5M lines from English and Japanese C4, creating sharded Parquet files 
 - **Warning:** Using `--no_dataset_streaming` will cause the script to download and load the *entirety* of the specified C4 language splits into your Hugging Face cache directory (or memory if cache is disabled) before processing begins. This can require a very large amount of disk space and memory, especially for multiple languages from C4.
 - If you use the default `--dataset_streaming` (or explicitly specify it), pre-tokenization will run on a single core but will be more memory-efficient for very large datasets.
 
+## BitBPE: Enhanced Tokenization for Multilingual Models
+
+ModernGPT2 now supports BitBPE (Bit-level Byte Pair Encoding), an alternative UTF-8 byte representation for multilingual models, particularly those handling CJK (Chinese, Japanese, Korean) languages.
+
+### What is BitBPE?
+
+BitBPE is based on the paper ["Bit-level BPE: Below the byte boundary"](https://arxiv.org/abs/2506.07541). It provides an alternative representation for UTF-8 byte sequences:
+
+- **Standard UTF-8**: Treats each UTF-8 byte as an atomic 8-bit unit
+- **UTF-8 in BitBPE**: Breaks the 8-bit boundary, using 6-bit prefixes and 9-bit tokens for better compression
+
+### Benefits for CJK Languages
+
+CJK characters typically require 3 bytes in UTF-8 encoding. BitBPE reduces this overhead by:
+- Using a 6-bit prefix token for common UTF-8 patterns
+- Redistributing the remaining 18 bits into two 9-bit tokens
+- Achieving up to 22% reduction in sequence length for byte-fallback encoded CJK text
+
+### Converting to BitBPE
+
+Convert an existing BPE tokenizer to BitBPE format:
+
+```bash
+python convert_bpe_to_bitbpe.py \
+    --input_path model/bpe-8k \
+    --output_path model/bpe-8k-bitbpe \
+    --num_prefix_tokens 64 \
+    --test_conversion
+```
+
+### Pre-tokenizing with BitBPE
+
+Use the streaming pre-tokenization script with BitBPE:
+
+```bash
+python pretokenize_dataset_streaming.py \
+    --tokenizer_path model/bpe-8k-bitbpe \
+    --output_path data/pretokenized-bitbpe \
+    --tokenizer_type bitbpe \
+    --languages en ja ko \
+    --max_samples_total 5000000 \
+    --block_size 1024
+```
+
+Key parameters:
+- `--tokenizer_type bitbpe`: Enables BitBPE encoding
+- `--languages`: Supports en (English/C4), ja (Japanese/FineWeb2), ko (Korean/FineWeb2)
+- `--max_samples_total`: Samples per language (5M = ~5B tokens with 1024 block size)
+
+### Training with BitBPE Data
+
+Training with BitBPE pre-tokenized data is identical to standard training:
+
+```bash
+acccelerate launch --config_file accelerate_config.yaml --num_processes 4 train.py \
+    --model_size_name "small" \
+    --tokenizer_path "model/bpe-8k-bitbpe" \
+    --pre_tokenized_dataset_path "data/pretokenized-bitbpe" \
+    --output_dir "output/bitbpe-model" \
+    --num_train_epochs 1 \
+    --per_device_train_batch_size 32 \
+    --learning_rate 2.5e-4
+```
+
+### Technical Details
+
+BitBPE implements the bit redistribution algorithm for 3-byte UTF-8 sequences (0xE0-0xEF):
+
+1. **Original**: `[b1: 8 bits] [b2: 8 bits] [b3: 8 bits]` (24 bits total)
+2. **BitBPE**: `[b1': 6 bits] [b2': 9 bits] [b3': 9 bits]` (24 bits total)
+
+The transformation:
+- b1' (prefix): `b1 >> 2` (top 6 bits of first byte)
+- b2': `((b1 & 3) << 7) | ((b2 & 254) >> 1)`
+- b3': `((b2 & 1) << 8) | b3`
+
+To reduce redundancy, repeated prefixes are deduplicated - if consecutive 3-byte sequences share the same prefix (b1'), the prefix token is only emitted once.
+
+This maintains the same information while allowing the tokenizer to learn more efficient representations for common CJK patterns.
+
 ### Step 3: Train Your Model
 
 We support various model sizes (small, medium, large, xl) and hardware configurations:
@@ -145,6 +225,14 @@ ModernGPT2 includes several new configuration parameters:
 - `rms_norm_eps`: Epsilon for RMSNorm layers (default: 1e-6)
 
 See `moderngpt2/configuration_moderngpt2.py` for all available options.
+
+### BitBPE Configuration
+
+When using a BitBPE tokenizer, the model automatically detects and handles the special encoding:
+
+- The tokenizer configuration includes `tokenizer_type: "bitbpe"`
+- Virtual vocabulary size increases by the number of prefix tokens (default: 64)
+- The model seamlessly handles both standard and BitBPE tokens during training
 
 ## Hardware Recommendations
 
