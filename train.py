@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=2.5e-4, help="Learning rate.")
     parser.add_argument("--warmup_ratio", type=float, default=0.05, help="Warmup ratio for learning rate scheduler.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine", help="Learning rate scheduler type. Default: 'cosine'.")
     parser.add_argument("--logging_steps", type=int, default=500, help="Log every X updates steps.")
     parser.add_argument("--save_steps", type=int, default=5000, help="Save checkpoint every X updates steps.")
     parser.add_argument("--eval_steps", type=int, default=500, help="Evaluate every X updates steps.")
@@ -249,6 +250,9 @@ def main():
         training_args_dict["warmup_steps"] = args.warmup_steps
     else:
         training_args_dict["warmup_ratio"] = args.warmup_ratio
+    
+    # Add learning rate scheduler type
+    training_args_dict["lr_scheduler_type"] = args.lr_scheduler_type
     
     training_args = TrainingArguments(**training_args_dict)
 
