@@ -175,7 +175,7 @@ def main():
     log_memory("Start")
     # Use AutoTokenizer which can load ModernGPT2TokenizerFast or other tokenizer types
     # This assumes tokenizer_path is a directory containing tokenizer.json
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True) # Added trust_remote_code for custom tokenizers
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token # Ensure pad token is set
 
@@ -193,21 +193,21 @@ def main():
         try:
             # Use C4 for English, FineWeb2 for CJK languages
             if lang == "en":
-                ds = load_dataset("c4", lang, streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("allenai/c4", lang, streaming=args.dataset_streaming, split="train")
             elif lang == "ja":
-                ds = load_dataset("HuggingFaceFW/fineweb-2", "jpn_Jpan", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("HuggingFaceFW/fineweb-2", "jpn_Jpan", streaming=args.dataset_streaming, split="train")
             elif lang == "ko":
-                ds = load_dataset("HuggingFaceFW/fineweb-2", "kor_Hang", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("HuggingFaceFW/fineweb-2", "kor_Hang", streaming=args.dataset_streaming, split="train")
             elif lang == "cn":
                 # Simplified Chinese (Mandarin)
-                ds = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train")
             elif lang == "tw":
                 # Traditional Chinese (Cantonese)
-                ds = load_dataset("HuggingFaceFW/fineweb-2", "yue_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("HuggingFaceFW/fineweb-2", "yue_Hani", streaming=args.dataset_streaming, split="train")
             elif lang == "zh":
                 # For backward compatibility, default to simplified Chinese
                 logger.warning("Language code 'zh' is deprecated. Use 'cn' for simplified Chinese or 'tw' for traditional Chinese. Defaulting to 'cn'.")
-                ds = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                ds = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train")
             else:
                 raise ValueError(f"Unsupported language: {lang}")
             return (lang, ds)
@@ -744,21 +744,21 @@ def process_languages_separately(args, tokenizer, get_memory_usage, log_memory):
             
             # Use C4 for English, FineWeb2 for CJK languages
             if lang == "en":
-                raw_dataset = load_dataset("c4", lang, streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("allenai/c4", lang, streaming=args.dataset_streaming, split="train")
             elif lang == "ja":
-                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "jpn_Jpan", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "jpn_Jpan", streaming=args.dataset_streaming, split="train")
             elif lang == "ko":
-                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "kor_Hang", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "kor_Hang", streaming=args.dataset_streaming, split="train")
             elif lang == "cn":
                 # Simplified Chinese (Mandarin)
-                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train")
             elif lang == "tw":
                 # Traditional Chinese (Cantonese)
-                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "yue_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "yue_Hani", streaming=args.dataset_streaming, split="train")
             elif lang == "zh":
                 # For backward compatibility
                 logger.warning("Language code 'zh' is deprecated. Use 'cn' for simplified Chinese or 'tw' for traditional Chinese. Defaulting to 'cn'.")
-                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train", trust_remote_code=True)
+                raw_dataset = load_dataset("HuggingFaceFW/fineweb-2", "cmn_Hani", streaming=args.dataset_streaming, split="train")
             else:
                 raise ValueError(f"Unsupported language: {lang}")
             

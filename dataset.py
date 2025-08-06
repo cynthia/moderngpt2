@@ -63,7 +63,8 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                     logger.warning(f"Training file not found, skipping: {file_path}")
                     continue
                 logger.info(f"Loading training file: {file_path}")
-                ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+                ds = load_dataset("parquet", data_files=file_path, split="train", 
+                                 streaming=False, keep_in_memory=False, cache_dir=None)
                 train_datasets.append(ds)
             
             if not train_datasets:
@@ -94,7 +95,8 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
                     logger.warning(f"Evaluation file not found, skipping: {file_path}")
                     continue
                 logger.info(f"Loading evaluation file: {file_path}")
-                ds = load_dataset("parquet", data_files=file_path, split="train", streaming=False)
+                ds = load_dataset("parquet", data_files=file_path, split="train", 
+                                 streaming=False, keep_in_memory=False, cache_dir=None)
                 # Take only eval_size samples from each file
                 if len(ds) > eval_size:
                     ds = ds.select(range(eval_size))
@@ -153,9 +155,14 @@ def get_dataset(tokenizer_path: str, block_size: int, streaming: bool = True, pr
         logger.info(f"Found {len(parquet_files)} Parquet files: {parquet_files}")
 
         # Load the dataset from Parquet files.
-        # `streaming=True` can be used if the dataset library supports efficient streaming from multiple Parquet files.
-        # If not streaming, the entire dataset will be loaded into memory, which might be large.
-        train_dataset = load_dataset("parquet", data_files=parquet_files, split="train", streaming=streaming)
+        # When streaming=True, data is read on-the-fly without caching
+        # When streaming=False, we disable cache to avoid duplicating data on disk
+        if streaming:
+            train_dataset = load_dataset("parquet", data_files=parquet_files, split="train", streaming=True)
+        else:
+            # Disable caching to avoid disk space issues with large datasets
+            train_dataset = load_dataset("parquet", data_files=parquet_files, split="train", 
+                                        streaming=False, keep_in_memory=False, cache_dir=None)
 
         logger.info(f"Pre-tokenized dataset loaded. Columns: {train_dataset.column_names if not streaming else 'unknown (streaming)'}")
 

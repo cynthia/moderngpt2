@@ -100,6 +100,8 @@ def main():
     parser.add_argument("--dataset_cache_dir", type=str, default=".dataset_cache", help="Directory to cache concatenated datasets.")
     parser.add_argument("--use_dataset_cache", action="store_true", help="Enable dataset caching for faster subsequent runs.")
     parser.add_argument("--clear_dataset_cache", action="store_true", help="Clear the dataset cache before training.")
+    parser.add_argument("--streaming", action="store_true", help="Enable streaming mode for pre-tokenized datasets to avoid caching.")
+    parser.add_argument("--force_no_streaming", action="store_true", help="Force disable streaming even for large datasets (may cause memory issues).")
 
     args = parser.parse_args()
 
@@ -150,7 +152,22 @@ def main():
             f"Pre-tokenized path: {args.pre_tokenized_dataset_path if args.pre_tokenized_dataset_path else 'Not provided (using C4 streaming)'}"
         )
     
-    streaming_dataset = not (args.pre_tokenized_dataset_path or args.metadata_file)  # True if using C4, False if using pre-tokenized or metadata
+    # Determine streaming mode
+    if args.force_no_streaming:
+        streaming_dataset = False
+        logger.info("Streaming disabled by --force_no_streaming flag")
+    elif args.streaming:
+        streaming_dataset = True
+        logger.info("Streaming enabled by --streaming flag")
+    elif args.pre_tokenized_dataset_path or args.metadata_file:
+        # Default to streaming for pre-tokenized data to avoid caching issues
+        streaming_dataset = True
+        logger.info("Streaming enabled by default for pre-tokenized datasets (use --force_no_streaming to disable)")
+    else:
+        # C4 dataset always uses streaming
+        streaming_dataset = True
+        logger.info("Streaming enabled for C4 dataset")
+    
     train_dataset, eval_dataset, tokenizer = get_dataset(
         tokenizer_path=args.tokenizer_path,
         block_size=args.block_size,
