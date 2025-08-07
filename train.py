@@ -51,6 +51,8 @@ def main():
         help="Output directory for model checkpoints and logs.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=1, help="Number of training epochs.")
+    parser.add_argument("--max_steps", type=int, default=None, help="Maximum number of training steps. Overrides num_train_epochs if set.")
+    parser.add_argument("--total_train_samples", type=int, default=None, help="Total number of training samples (for calculating steps with streaming datasets).")
     parser.add_argument(
         "--per_device_train_batch_size", type=int, default=8, help="Batch size per device during training."
     )
@@ -242,11 +244,69 @@ def main():
                 logger.error(f"Python version: {sys.version}")
                 raise ImportError("wandb is required when --report_to wandb is specified. Install with: pip install wandb")
     
+    # Calculate max_steps if needed for streaming datasets
+    if streaming_dataset and args.max_steps is None:
+        if args.total_train_samples:
+            # Calculate based on provided total samples
+            world_size = accelerator.num_processes
+            batch_size_per_step = args.per_device_train_batch_size * world_size * args.gradient_accumulation_steps
+            calculated_max_steps = (args.total_train_samples // batch_size_per_step) * args.num_train_epochs
+            logger.info(f"Calculated max_steps={calculated_max_steps} based on {args.total_train_samples} samples")
+            args.max_steps = calculated_max_steps
+        elif args.pre_tokenized_dataset_path:
+            # Count actual samples from parquet files
+            import glob
+            import pyarrow.parquet as pq
+            
+            parquet_files = sorted(glob.glob(os.path.join(args.pre_tokenized_dataset_path, "*.parquet")))
+            num_files = len(parquet_files)
+            
+            if num_files > 0:
+                # Check first file for typical size
+                first_table = pq.read_table(parquet_files[0])
+                first_count = len(first_table)
+                
+                # Check last file which might be smaller
+                last_table = pq.read_table(parquet_files[-1])
+                last_count = len(last_table)
+                
+                # If all files likely have same size (except maybe the last)
+                if num_files == 1:
+                    total_samples = first_count
+                elif last_count < first_count:
+                    # Last file is partial
+                    total_samples = first_count * (num_files - 1) + last_count
+                else:
+                    # All files likely have same size
+                    total_samples = first_count * num_files
+                
+                logger.info(
+                    f"Counted {total_samples:,} samples from {num_files} parquet files "
+                    f"(first file: {first_count:,}, last file: {last_count:,})"
+                )
+                
+                world_size = accelerator.num_processes
+                batch_size_per_step = args.per_device_train_batch_size * world_size * args.gradient_accumulation_steps
+                calculated_max_steps = (total_samples // batch_size_per_step) * args.num_train_epochs
+                logger.info(f"Calculated max_steps={calculated_max_steps}")
+                args.max_steps = calculated_max_steps
+            else:
+                raise ValueError(f"No parquet files found in {args.pre_tokenized_dataset_path}")
+        else:
+            # Default for streaming without known size (can be adjusted)
+            default_steps_per_epoch = 100000  # Default assumption
+            args.max_steps = default_steps_per_epoch * args.num_train_epochs
+            logger.warning(
+                f"Streaming dataset without known size. Using default max_steps={args.max_steps}. "
+                f"Provide --total_train_samples or --max_steps for accurate training length."
+            )
+    
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
     training_args_dict = {
         "output_dir": args.output_dir,
-        "num_train_epochs": args.num_train_epochs,
+        "num_train_epochs": args.num_train_epochs if args.max_steps is None else 1,
+        "max_steps": args.max_steps if args.max_steps is not None else -1,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
         "learning_rate": args.learning_rate,
