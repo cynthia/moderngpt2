@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--save_total_limit", type=int, default=10, help="Limit the total number of checkpoints.")
     parser.add_argument("--report_to", type=str, default="none", help="Report metrics to (e.g., 'wandb', 'tensorboard', 'none'). Default: 'none'.")
     parser.add_argument("--wandb_project", type=str, default="moderngpt2", help="W&B project name. Default: 'moderngpt2'.")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name. If not provided, will auto-generate based on model size.")
     parser.add_argument("--ds_config", "--deepspeed_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
     parser.add_argument(
         "--streaming_eval_samples", type=int, default=1000, help="Number of samples for streaming evaluation."
@@ -338,7 +339,11 @@ def main():
     
     # Add wandb project name if using wandb
     if args.report_to == "wandb":
-        training_args_dict["run_name"] = f"{args.wandb_project}-{args.model_size_name}"
+        # Use provided run name or generate one
+        if args.wandb_run_name:
+            training_args_dict["run_name"] = args.wandb_run_name
+        else:
+            training_args_dict["run_name"] = f"{args.wandb_project}-{args.model_size_name}"
         # Set wandb project via environment variable (Trainer will read this)
         os.environ["WANDB_PROJECT"] = args.wandb_project
         # Disable wandb on non-main processes
