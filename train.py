@@ -2,6 +2,7 @@ import argparse
 import torch
 from itertools import islice
 import os
+import sys
 
 from dataset import get_dataset # Added import
 from moderngpt2 import (
@@ -191,12 +192,23 @@ def main():
         model_size_name=args.model_size_name,
         pad_token_id=tokenizer.pad_token_id, # Use tokenizer from get_dataset
     )
-    if config.vocab_size != tokenizer.vocab_size:
-        logger.warning(
-            f"Config vocab_size ({config.vocab_size}) does not match tokenizer vocab_size ({tokenizer.vocab_size}). "
-            f"Setting config.vocab_size to {tokenizer.vocab_size}."
+    
+    # Adjust vocab size to accommodate special tokens like pad token
+    # If pad_token_id >= vocab_size, we need to expand the vocab
+    required_vocab_size = tokenizer.vocab_size
+    if tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= required_vocab_size:
+        required_vocab_size = tokenizer.pad_token_id + 1
+        logger.info(
+            f"Adjusting vocab_size from {tokenizer.vocab_size} to {required_vocab_size} "
+            f"to accommodate pad_token_id={tokenizer.pad_token_id}"
         )
-        config.vocab_size = tokenizer.vocab_size
+    
+    if config.vocab_size != required_vocab_size:
+        logger.warning(
+            f"Config vocab_size ({config.vocab_size}) does not match required vocab_size ({required_vocab_size}). "
+            f"Setting config.vocab_size to {required_vocab_size}."
+        )
+        config.vocab_size = required_vocab_size
 
     model = ModernGPT2LMHeadModel(config)
     
@@ -217,7 +229,18 @@ def main():
     # W&B project name will be passed to TrainingArguments
     # The Trainer will handle wandb initialization on rank 0 only
     if args.report_to == "wandb":
-        logger.info(f"W&B logging will be enabled with project: {args.wandb_project}")
+        if os.environ.get("WANDB_DISABLED") == "true":
+            logger.warning("WANDB_DISABLED=true detected, disabling wandb reporting")
+            args.report_to = "none"
+        else:
+            try:
+                import wandb
+                logger.info(f"W&B logging will be enabled with project: {args.wandb_project}")
+            except ImportError:
+                logger.error("wandb is not installed but --report_to wandb was specified. Install with: pip install wandb")
+                logger.error(f"Python path: {sys.executable}")
+                logger.error(f"Python version: {sys.version}")
+                raise ImportError("wandb is required when --report_to wandb is specified. Install with: pip install wandb")
     
     # TrainingArguments
     logger.info("Setting up TrainingArguments...")
@@ -278,7 +301,7 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
