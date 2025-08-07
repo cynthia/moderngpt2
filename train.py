@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--save_total_limit", type=int, default=10, help="Limit the total number of checkpoints.")
     parser.add_argument("--report_to", type=str, default="none", help="Report metrics to (e.g., 'wandb', 'tensorboard', 'none'). Default: 'none'.")
     parser.add_argument("--wandb_project", type=str, default="moderngpt2", help="W&B project name. Default: 'moderngpt2'.")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (team/organization name). If not provided, uses default entity.")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name. If not provided, will auto-generate based on model size.")
     parser.add_argument("--ds_config", "--deepspeed_config", type=str, default=None, help="Path to DeepSpeed config JSON for Hugging Face Trainer.")
     parser.add_argument(
@@ -341,13 +342,16 @@ def main():
         else:
             training_args_dict["run_name"] = f"{args.wandb_project}-{args.model_size_name}"
         
-        # Set wandb project via environment variable (Trainer will read this)
+        # Set wandb project and entity via environment variables (Trainer will read these)
         os.environ["WANDB_PROJECT"] = args.wandb_project
+        if args.wandb_entity:
+            os.environ["WANDB_ENTITY"] = args.wandb_entity
         
         # For distributed training, log only from the main process (this is the default)
         # The Trainer automatically handles wandb initialization only on rank 0
         if accelerator.is_main_process:
-            logger.info(f"W&B will log from main process with project: {args.wandb_project}, run: {training_args_dict['run_name']}")
+            entity_msg = f", entity: {args.wandb_entity}" if args.wandb_entity else ""
+            logger.info(f"W&B will log from main process with project: {args.wandb_project}{entity_msg}, run: {training_args_dict['run_name']}")
         else:
             logger.info("W&B logging disabled on non-main process (handled by Trainer)")
     
