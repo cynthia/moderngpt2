@@ -232,18 +232,14 @@ def main():
     # W&B project name will be passed to TrainingArguments
     # The Trainer will handle wandb initialization on rank 0 only
     if args.report_to == "wandb":
-        if os.environ.get("WANDB_DISABLED") == "true":
-            logger.warning("WANDB_DISABLED=true detected, disabling wandb reporting")
-            args.report_to = "none"
-        else:
-            try:
-                import wandb
-                logger.info(f"W&B logging will be enabled with project: {args.wandb_project}")
-            except ImportError:
-                logger.error("wandb is not installed but --report_to wandb was specified. Install with: pip install wandb")
-                logger.error(f"Python path: {sys.executable}")
-                logger.error(f"Python version: {sys.version}")
-                raise ImportError("wandb is required when --report_to wandb is specified. Install with: pip install wandb")
+        try:
+            import wandb
+            logger.info(f"W&B logging will be enabled with project: {args.wandb_project}")
+        except ImportError:
+            logger.error("wandb is not installed but --report_to wandb was specified. Install with: pip install wandb")
+            logger.error(f"Python path: {sys.executable}")
+            logger.error(f"Python version: {sys.version}")
+            raise ImportError("wandb is required when --report_to wandb is specified. Install with: pip install wandb")
     
     # Calculate max_steps if needed for streaming datasets
     if streaming_dataset and args.max_steps is None:
@@ -316,7 +312,7 @@ def main():
         "save_steps": args.save_steps,
         "eval_steps": args.eval_steps,
         "save_total_limit": args.save_total_limit,
-        "report_to": args.report_to if args.report_to != "none" else None,  # Handle "none" case
+        "report_to": [args.report_to] if args.report_to != "none" else [],  # Pass as list for proper handling
         "deepspeed": args.ds_config,
         "fp16": args.fp16,
         "bf16": args.bf16,
@@ -344,11 +340,16 @@ def main():
             training_args_dict["run_name"] = args.wandb_run_name
         else:
             training_args_dict["run_name"] = f"{args.wandb_project}-{args.model_size_name}"
+        
         # Set wandb project via environment variable (Trainer will read this)
         os.environ["WANDB_PROJECT"] = args.wandb_project
-        # Disable wandb on non-main processes
-        if not accelerator.is_main_process:
-            os.environ["WANDB_DISABLED"] = "true"
+        
+        # For distributed training, log only from the main process (this is the default)
+        # The Trainer automatically handles wandb initialization only on rank 0
+        if accelerator.is_main_process:
+            logger.info(f"W&B will log from main process with project: {args.wandb_project}, run: {training_args_dict['run_name']}")
+        else:
+            logger.info("W&B logging disabled on non-main process (handled by Trainer)")
     
     # Handle warmup_steps vs warmup_ratio
     if args.warmup_steps is not None:
